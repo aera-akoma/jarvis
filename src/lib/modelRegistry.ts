@@ -32,22 +32,15 @@ export const buildInitialState = (): AppState => ({
       baseUrl: "https://api.openai.com/v1",
       enabled: true,
       autoDiscovered: false,
-      activeApiKeyName: "Demo Key",
-      apiKeys: [
-        {
-          id: uid("key"),
-          name: "Demo Key",
-          value: "sk-demo-key",
-          createdAt: new Date().toISOString(),
-        },
-      ],
+      activeApiKeyId: undefined,
+      apiKeys: [],
       createdAt: new Date().toISOString(),
     },
     {
       ...buildProviderConfig(),
       enabled: true,
       autoDiscovered: false,
-      activeApiKeyName: undefined,
+      activeApiKeyId: undefined,
       apiKeys: [],
       createdAt: new Date().toISOString(),
     },
@@ -74,17 +67,6 @@ export const buildInitialState = (): AppState => ({
       available: true,
       apiFormat: "openai-compatible",
       baseUrl: "https://api.openai.com/v1",
-    },
-    {
-      id: "deep-ask-free",
-      providerId: "opencode-zen",
-      displayName: "Deep Ask Free",
-      category: "cloud",
-      free: true,
-      capabilities: ["text", "chat", "cloud"],
-      available: true,
-      apiFormat: "openai-compatible",
-      baseUrl: "https://opencode.ai/zen/v1",
     },
   ],
   conversations: [],
@@ -116,7 +98,7 @@ export const addProvider = (
 export const addApiKey = (
   state: AppState,
   providerId: string,
-  keyDraft: { name: string; value: string },
+  keyDraft: { id: string; name: string; secureCredentialReference: string },
 ): ApiKey => {
   const provider = state.providers.find((entry) => entry.id === providerId);
 
@@ -125,15 +107,17 @@ export const addApiKey = (
   }
 
   const apiKey: ApiKey = {
-    id: uid("key"),
+    id: keyDraft.id,
+    providerId,
     name: keyDraft.name,
-    value: keyDraft.value,
+    secureCredentialReference: keyDraft.secureCredentialReference,
     createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 
   provider.apiKeys.push(apiKey);
-  if (!provider.activeApiKeyName) {
-    provider.activeApiKeyName = apiKey.name;
+  if (!provider.activeApiKeyId) {
+    provider.activeApiKeyId = apiKey.id;
   }
 
   return apiKey;
@@ -142,14 +126,20 @@ export const addApiKey = (
 export const setActiveApiKey = (
   state: AppState,
   providerId: string,
-  apiKeyName: string,
+  apiKeyId: string,
 ) => {
   const provider = state.providers.find((entry) => entry.id === providerId);
   if (!provider) {
     throw new Error(`Provider ${providerId} was not found`);
   }
 
-  provider.activeApiKeyName = apiKeyName;
+  if (!provider.apiKeys.some((key) => key.id === apiKeyId)) {
+    throw new Error(
+      `Credential ${apiKeyId} was not found for provider ${providerId}`,
+    );
+  }
+
+  provider.activeApiKeyId = apiKeyId;
 };
 
 export const addManualModel = (
@@ -188,7 +178,7 @@ export const getFilteredModels = (
   let models = [...state.models];
 
   if (options.freeOnly) {
-    models = models.filter((model) => model.free);
+    models = models.filter((model) => model.free === true);
   }
 
   if (options.category) {
@@ -221,8 +211,10 @@ export const addDiscoveredModels = (
       .filter((entry): entry is string => typeof entry === "string"),
   );
 
-  state.models = state.models.filter(
-    (model) => model.providerId !== providerId || discoveredIds.has(model.id),
+  state.models = state.models.map((model) =>
+    model.providerId === providerId
+      ? { ...model, available: discoveredIds.has(model.id) }
+      : model,
   );
 
   for (const discoveredModel of discovered) {
@@ -230,12 +222,15 @@ export const addDiscoveredModels = (
       id: discoveredModel.id ?? uid("local-model"),
       providerId,
       displayName: discoveredModel.displayName ?? discoveredModel.id ?? "Model",
-      category: discoveredModel.category ?? "local",
-      free: discoveredModel.free ?? true,
-      capabilities: discoveredModel.capabilities ?? ["text"],
+      category:
+        discoveredModel.category ??
+        (provider.type === "local" ? "local" : "cloud"),
+      free: discoveredModel.free ?? "unknown",
+      capabilities: discoveredModel.capabilities ?? [],
       available: discoveredModel.available ?? true,
       apiFormat: discoveredModel.apiFormat ?? provider.apiFormat,
       baseUrl: discoveredModel.baseUrl ?? provider.baseUrl,
+      ...discoveredModel,
     };
 
     const existingIndex = state.models.findIndex(
@@ -246,6 +241,7 @@ export const addDiscoveredModels = (
       state.models[existingIndex] = {
         ...state.models[existingIndex],
         ...model,
+        available: discoveredModel.available ?? true,
       };
     } else {
       state.models.push(model);

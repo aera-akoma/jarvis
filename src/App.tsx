@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addApiKey,
   addDiscoveredModels,
@@ -16,12 +16,8 @@ import {
   simulateProviderRequest,
   validateModelCapabilities,
 } from "./lib/agentRuntime";
-import {
-  buildProviderConfig,
-  executeOpenCodeZenChat,
-  fetchOpenCodeZenModels,
-  testOpenCodeZenConnection,
-} from "./lib/opencodeZen";
+import { buildProviderConfig, OPENCODE_PROVIDER_ID } from "./lib/opencodeZen";
+import { generateModel } from "./lib/modelRequest";
 import { buildResearchPlan, summarizeDocument } from "./lib/research";
 import { MemoryStore, suggestSkills } from "./lib/memory";
 import {
@@ -35,62 +31,14 @@ import "./App.css";
 const uid = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 
-const maskKey = (value: string) => {
-  if (!value) {
-    return "Not configured";
-  }
-
-  if (value.length <= 8) {
-    return `${value.slice(0, 2)}••••${value.slice(-2)}`;
-  }
-
-  return `${value.slice(0, 4)}••••••••${value.slice(-4)}`;
-};
-
-const maskStoredSecrets = (value: string) => {
-  if (!value) {
-    return value;
-  }
-
-  try {
-    return btoa(encodeURIComponent(value));
-  } catch {
-    return value;
-  }
-};
-
-const restoreStoredSecrets = (value: string) => {
-  if (!value) {
-    return value;
-  }
-
-  try {
-    return decodeURIComponent(atob(value));
-  } catch {
-    return value;
-  }
-};
-
 const sanitizeStateForStorage = (nextState: AppState) => {
   const clone = JSON.parse(JSON.stringify(nextState));
   clone.providers = (clone.providers ?? []).map((provider: any) => ({
     ...provider,
-    apiKeys: (provider.apiKeys ?? []).map((key: any) => ({
-      ...key,
-      value: maskStoredSecrets(key.value),
-    })),
-  }));
-  return clone;
-};
-
-const restoreSecretsFromStorage = (nextState: AppState) => {
-  const clone = JSON.parse(JSON.stringify(nextState));
-  clone.providers = (clone.providers ?? []).map((provider: any) => ({
-    ...provider,
-    apiKeys: (provider.apiKeys ?? []).map((key: any) => ({
-      ...key,
-      value: restoreStoredSecrets(key.value),
-    })),
+    apiKeys: (provider.apiKeys ?? []).map((key: any) => {
+      const { value: _legacySecret, ...metadata } = key;
+      return metadata;
+    }),
   }));
   return clone;
 };
@@ -124,7 +72,9 @@ const loadSavedState = async (): Promise<AppState> => {
   if (window.electronAPI) {
     const state = await window.electronAPI.loadState();
     if (state && state.providers?.length) {
-      return restoreSecretsFromStorage(state);
+      const sanitized = sanitizeStateForStorage(state);
+      window.localStorage.setItem("aera-state", JSON.stringify(sanitized));
+      return sanitized;
     }
   }
 
@@ -132,7 +82,7 @@ const loadSavedState = async (): Promise<AppState> => {
   if (saved) {
     try {
       const parsed = JSON.parse(saved) as AppState;
-      return restoreSecretsFromStorage(parsed);
+      return sanitizeStateForStorage(parsed);
     } catch {
       return buildInitialState();
     }
@@ -148,7 +98,7 @@ function App() {
     useState<ProviderDraft>(defaultProviderDraft);
   const [selectedProviderId, setSelectedProviderId] = useState("openai");
   const [apiKeyName, setApiKeyName] = useState("Personal GPT");
-  const [apiKeyValue, setApiKeyValue] = useState("");
+  const apiKeyValueRef = useRef<HTMLInputElement>(null);
   const [modelDraft, setModelDraft] = useState({
     ...defaultModelDraft,
     providerId: "openai",
@@ -158,9 +108,10 @@ function App() {
   );
   const [freeOnly, setFreeOnly] = useState(false);
   const [modelFilter, setModelFilter] = useState<
-    "all" | "free" | "local" | "cloud"
+    "all" | "free" | "local" | "cloud" | "vision" | "tools" | "reasoning"
   >("all");
   const [modelSearch, setModelSearch] = useState("");
+  const [zenConnectionStatus, setZenConnectionStatus] = useState("Not tested");
   const [status, setStatus] = useState("Ready");
   const [toolApproved, setToolApproved] = useState(false);
   const [toolConsole, setToolConsole] = useState<string[]>(["Tooling ready."]);
@@ -194,8 +145,8 @@ function App() {
   }, []);
 
   const persistState = async (nextState: AppState) => {
-    setState(nextState);
     const safeState = sanitizeStateForStorage(nextState);
+    setState(safeState);
     window.localStorage.setItem("aera-state", JSON.stringify(safeState));
     if (window.electronAPI) {
       await window.electronAPI.saveState(safeState);
@@ -221,13 +172,25 @@ function App() {
           : modelFilter === "cloud"
             ? getFilteredModels(state, { category: "cloud" })
             : getFilteredModels(state);
+    const withCapability = ["vision", "tools", "reasoning"].includes(
+      modelFilter,
+    )
+      ? current.filter((model) =>
+          model.capabilities.some((capability) => {
+            const normalized = capability.toLowerCase();
+            return modelFilter === "tools"
+              ? normalized.includes("tool") || normalized.includes("function")
+              : normalized.includes(modelFilter);
+          }),
+        )
+      : current;
 
     const trimmed = modelSearch.trim().toLowerCase();
     if (!trimmed) {
-      return current;
+      return withCapability;
     }
 
-    return current.filter((model) =>
+    return withCapability.filter((model) =>
       model.displayName.toLowerCase().includes(trimmed),
     );
   }, [modelFilter, modelSearch, state]);
@@ -255,23 +218,29 @@ function App() {
 
   const handleRefreshOpenCodeModels = async () => {
     const provider = await ensureOpenCodeZenProvider();
-    const activeKey = provider.apiKeys.find(
-      (key) => key.name === provider.activeApiKeyName,
-    );
-    const secret = activeKey?.value ?? provider.apiKeys[0]?.value;
-
-    if (!secret) {
+    if (!window.electronAPI) {
+      setStatus(
+        "OpenCode Zen discovery is available in the Jarvis desktop app.",
+      );
+      return;
+    }
+    if (!provider.activeApiKeyId) {
       setStatus("Add an OpenCode Zen API key before refreshing the catalog.");
       return;
     }
 
     try {
-      const discovered = await fetchOpenCodeZenModels(secret);
+      const discovered = await window.electronAPI.discoverProviderModels({
+        providerId: provider.id,
+        credentialId: provider.activeApiKeyId,
+      });
       const nextState = { ...state };
       addDiscoveredModels(nextState, provider.id, discovered);
       await persistState(nextState);
+      setZenConnectionStatus("Connected");
       setStatus(`Loaded ${discovered.length} OpenCode Zen models.`);
     } catch (error) {
+      setZenConnectionStatus("Disconnected");
       setStatus(
         error instanceof Error
           ? error.message
@@ -282,59 +251,28 @@ function App() {
 
   const handleOpenCodeTest = async () => {
     const provider = await ensureOpenCodeZenProvider();
-    const activeKey = provider.apiKeys.find(
-      (key) => key.name === provider.activeApiKeyName,
-    );
-    const secret = activeKey?.value ?? provider.apiKeys[0]?.value;
-
-    if (!secret) {
+    if (!window.electronAPI) {
+      setStatus("Connection testing is available in the Jarvis desktop app.");
+      return;
+    }
+    if (!provider.activeApiKeyId) {
       setStatus("Add an OpenCode Zen API key to test connectivity.");
       return;
     }
 
     try {
-      const result = await testOpenCodeZenConnection(secret);
+      const result = await window.electronAPI.testProviderConnection({
+        providerId: provider.id,
+        credentialId: provider.activeApiKeyId,
+      });
+      setZenConnectionStatus("Connected");
       setStatus(result.message);
     } catch (error) {
+      setZenConnectionStatus("Disconnected");
       setStatus(
         error instanceof Error
           ? error.message
           : "OpenCode Zen connection test failed.",
-      );
-    }
-  };
-
-  const handleOpenCodeChat = async () => {
-    const provider = await ensureOpenCodeZenProvider();
-    const activeKey = provider.apiKeys.find(
-      (key) => key.name === provider.activeApiKeyName,
-    );
-    const secret = activeKey?.value ?? provider.apiKeys[0]?.value;
-    const selected = state.models.find(
-      (entry) =>
-        entry.providerId === provider.id && entry.id === state.selectedModelId,
-    );
-
-    if (!secret) {
-      setStatus("Add an OpenCode Zen API key before sending a message.");
-      return;
-    }
-
-    if (!selected) {
-      setStatus("Select an OpenCode Zen model before sending a prompt.");
-      return;
-    }
-
-    try {
-      const result = await executeOpenCodeZenChat(
-        secret,
-        selected.id,
-        messageDraft.trim(),
-      );
-      setStatus(result.content.slice(0, 160));
-    } catch (error) {
-      setStatus(
-        error instanceof Error ? error.message : "OpenCode Zen request failed.",
       );
     }
   };
@@ -370,27 +308,112 @@ function App() {
       return;
     }
 
-    if (!apiKeyName.trim() || !apiKeyValue.trim()) {
+    const secret = apiKeyValueRef.current?.value.trim() ?? "";
+    if (!apiKeyName.trim() || !secret) {
       setStatus("Key name and value are required.");
       return;
     }
+    if (!window.electronAPI) {
+      setStatus(
+        "Secure API-key storage is available in the Jarvis desktop app.",
+      );
+      return;
+    }
 
-    const nextState = { ...state };
-    addApiKey(nextState, selectedProviderId, {
-      name: apiKeyName.trim(),
-      value: apiKeyValue.trim(),
-    });
-    setApiKeyValue("");
-    setApiKeyName("Personal GPT");
-    await persistState(nextState);
-    setStatus(`Stored API key for ${provider.name}`);
+    const credentialId = uid("credential");
+    if (apiKeyValueRef.current) apiKeyValueRef.current.value = "";
+    try {
+      await window.electronAPI.storeCredential({
+        credentialId,
+        providerId: provider.id,
+        secret,
+      });
+      const nextState = { ...state };
+      addApiKey(nextState, provider.id, {
+        id: credentialId,
+        name: apiKeyName.trim(),
+        secureCredentialReference: credentialId,
+      });
+      await persistState(nextState);
+      setApiKeyName("Personal Key");
+      setStatus(`Stored ${provider.name} credential securely.`);
+    } catch (error) {
+      await window.electronAPI.deleteCredential({
+        credentialId,
+        providerId: provider.id,
+      });
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "Could not store API key securely.",
+      );
+    }
   };
 
-  const updateActiveKey = async (providerId: string, keyName: string) => {
+  const updateActiveKey = async (providerId: string, keyId: string) => {
     const nextState = { ...state };
-    setActiveApiKey(nextState, providerId, keyName);
+    setActiveApiKey(nextState, providerId, keyId);
     await persistState(nextState);
-    setStatus(`Active key: ${keyName}`);
+    setStatus("Active API key updated.");
+  };
+
+  const testApiKey = async (providerId: string, credentialId: string) => {
+    if (!window.electronAPI) {
+      setStatus("Connection testing is available in the Jarvis desktop app.");
+      return;
+    }
+    try {
+      const result = await window.electronAPI.testProviderConnection({
+        providerId,
+        credentialId,
+      });
+      if (providerId === OPENCODE_PROVIDER_ID) {
+        setZenConnectionStatus("Connected");
+      }
+      setStatus(result.message);
+    } catch (error) {
+      if (providerId === OPENCODE_PROVIDER_ID) {
+        setZenConnectionStatus("Disconnected");
+      }
+      setStatus(
+        error instanceof Error ? error.message : "Connection test failed.",
+      );
+    }
+  };
+
+  const renameApiKey = async (providerId: string, credentialId: string) => {
+    const nextState = { ...state };
+    const provider = getProviderById(nextState, providerId);
+    const credential = provider?.apiKeys.find((key) => key.id === credentialId);
+    if (!provider || !credential) return;
+    const name = window.prompt("Credential name", credential.name)?.trim();
+    if (!name) return;
+    credential.name = name;
+    credential.updatedAt = new Date().toISOString();
+    await persistState(nextState);
+    setStatus("Credential name updated.");
+  };
+
+  const deleteApiKey = async (providerId: string, credentialId: string) => {
+    const provider = getProviderById(state, providerId);
+    if (!provider || !window.electronAPI) return;
+    await window.electronAPI.deleteCredential({
+      credentialId:
+        provider.apiKeys.find((key) => key.id === credentialId)
+          ?.secureCredentialReference ?? credentialId,
+      providerId,
+    });
+    const nextState = { ...state };
+    const nextProvider = getProviderById(nextState, providerId);
+    if (!nextProvider) return;
+    nextProvider.apiKeys = nextProvider.apiKeys.filter(
+      (key) => key.id !== credentialId,
+    );
+    if (nextProvider.activeApiKeyId === credentialId) {
+      nextProvider.activeApiKeyId = nextProvider.apiKeys[0]?.id;
+    }
+    await persistState(nextState);
+    setStatus("Credential deleted.");
   };
 
   const handleRefreshLocalModels = async () => {
@@ -514,18 +537,16 @@ function App() {
       createdAt: new Date().toISOString(),
     };
 
-    const responseText = selectedModel
-      ? `Using ${selectedModel.displayName}. I am preparing the requested analysis and will continue with the selected model.`
-      : "I am ready to help.";
+    if (!selectedModel) {
+      setStatus("Select a model before sending a message.");
+      return;
+    }
+    if (!window.electronAPI) {
+      setStatus("Model execution is available in the Jarvis desktop app.");
+      return;
+    }
 
-    const assistantMessage = {
-      id: uid("assistant"),
-      role: "assistant" as const,
-      content: responseText,
-      createdAt: new Date().toISOString(),
-    };
-
-    conversation.messages.push(userMessage, assistantMessage);
+    conversation.messages.push(userMessage);
     conversation.updatedAt = new Date().toISOString();
     conversation.title =
       conversation.messages[0]?.content?.slice(0, 40) ?? "New conversation";
@@ -537,9 +558,38 @@ function App() {
 
     await persistState(nextState);
     setMessageDraft("");
-    setStatus(
-      `Conversation saved with ${selectedModel?.displayName ?? "model"}.`,
-    );
+    setStatus(`Sending to ${selectedModel.displayName}...`);
+
+    try {
+      const result = await generateModel(
+        selectedModel.id,
+        conversation.messages.map(({ role, content }) => ({ role, content })),
+      );
+      const assistantMessage = {
+        id: uid("assistant"),
+        role: "assistant" as const,
+        content: result.content,
+        createdAt: new Date().toISOString(),
+      };
+      const responseConversation = {
+        ...conversation,
+        messages: [...conversation.messages, assistantMessage],
+        updatedAt: new Date().toISOString(),
+        modelId: selectedModel.id,
+      };
+      const responseState = {
+        ...nextState,
+        conversations: nextState.conversations.map((entry) =>
+          entry.id === conversationId ? responseConversation : entry,
+        ),
+      };
+      await persistState(responseState);
+      setStatus(`${selectedModel.displayName} responded.`);
+    } catch (error) {
+      setStatus(
+        error instanceof Error ? error.message : "Model request failed.",
+      );
+    }
   };
 
   const executeToolAction = async (request: ToolRequest) => {
@@ -603,6 +653,17 @@ function App() {
     () => suggestSkills(messageDraft || task.objective),
     [messageDraft, task.objective],
   );
+  const availableCapabilityFilters = ["vision", "tools", "reasoning"].filter(
+    (filter) =>
+      state.models.some((model) =>
+        model.capabilities.some((capability) => {
+          const normalized = capability.toLowerCase();
+          return filter === "tools"
+            ? normalized.includes("tool") || normalized.includes("function")
+            : normalized.includes(filter);
+        }),
+      ),
+  );
 
   return (
     <div className="app-shell">
@@ -643,7 +704,14 @@ function App() {
                   value={modelFilter}
                   onChange={(event) =>
                     setModelFilter(
-                      event.target.value as "all" | "free" | "local" | "cloud",
+                      event.target.value as
+                        | "all"
+                        | "free"
+                        | "local"
+                        | "cloud"
+                        | "vision"
+                        | "tools"
+                        | "reasoning",
                     )
                   }
                 >
@@ -651,6 +719,11 @@ function App() {
                   <option value="free">Free</option>
                   <option value="local">Local</option>
                   <option value="cloud">Cloud</option>
+                  {availableCapabilityFilters.map((filter) => (
+                    <option key={filter} value={filter}>
+                      {filter[0].toUpperCase() + filter.slice(1)}
+                    </option>
+                  ))}
                 </select>
               </div>
               <label className="model-picker">
@@ -664,22 +737,29 @@ function App() {
                     }));
                   }}
                 >
-                  {filteredModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.displayName}
-                    </option>
-                  ))}
+                  {state.providers.map((provider) => {
+                    const providerModels = filteredModels.filter(
+                      (model) => model.providerId === provider.id,
+                    );
+                    return providerModels.length ? (
+                      <optgroup key={provider.id} label={provider.name}>
+                        {providerModels.map((model) => (
+                          <option
+                            key={model.id}
+                            value={model.id}
+                            disabled={!model.available}
+                          >
+                            {model.displayName}
+                            {model.available ? "" : " (Unavailable)"}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ) : null;
+                  })}
                 </select>
               </label>
               <button type="button" className="primary" onClick={sendMessage}>
                 GO
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={handleOpenCodeChat}
-              >
-                OpenCode Test
               </button>
             </div>
           </div>
@@ -1051,9 +1131,9 @@ function App() {
                 />
                 <input
                   type="password"
-                  value={apiKeyValue}
-                  onChange={(event) => setApiKeyValue(event.target.value)}
+                  ref={apiKeyValueRef}
                   placeholder="Secret API key"
+                  autoComplete="new-password"
                 />
               </div>
               <button
@@ -1070,24 +1150,76 @@ function App() {
                   <div key={key.id} className="key-row">
                     <div>
                       <strong>{key.name}</strong>
-                      <span>{maskKey(key.value)}</span>
+                      <span>••••••••••••</span>
                     </div>
                     <button
                       type="button"
                       className="secondary"
                       onClick={() =>
-                        updateActiveKey(selectedProviderId, key.name)
+                        updateActiveKey(selectedProviderId, key.id)
                       }
                     >
                       {state.providers.find(
                         (provider) => provider.id === selectedProviderId,
-                      )?.activeApiKeyName === key.name
+                      )?.activeApiKeyId === key.id
                         ? "Active"
                         : "Use"}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => testApiKey(selectedProviderId, key.id)}
+                    >
+                      Test
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => renameApiKey(selectedProviderId, key.id)}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => deleteApiKey(selectedProviderId, key.id)}
+                    >
+                      Delete
                     </button>
                   </div>
                 ))}
             </div>
+
+            {selectedProviderId === OPENCODE_PROVIDER_ID && (
+              <div className="settings-section">
+                <h3>OpenCode Zen</h3>
+                <p>Status: {zenConnectionStatus}</p>
+                <p>
+                  {
+                    state.models.filter(
+                      (model) => model.providerId === OPENCODE_PROVIDER_ID,
+                    ).length
+                  }{" "}
+                  models discovered
+                </p>
+                <div className="tool-actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleOpenCodeTest}
+                  >
+                    Test Connection
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleRefreshOpenCodeModels}
+                  >
+                    Refresh Models
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="settings-section">
               <h3>Manage Models</h3>

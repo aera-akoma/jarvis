@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addApiKey,
+  addDiscoveredModels,
   addManualModel,
   addProvider,
   buildInitialState,
@@ -19,12 +20,20 @@ describe("model registry", () => {
       baseUrl: "https://api.openai.com/v1",
     });
 
-    addApiKey(state, provider.id, { name: "Personal GPT", value: "secret-1" });
-    addApiKey(state, provider.id, { name: "Backup GPT", value: "secret-2" });
-    setActiveApiKey(state, provider.id, "Personal GPT");
+    addApiKey(state, provider.id, {
+      id: "credential-personal",
+      name: "Personal GPT",
+      secureCredentialReference: "credential-personal",
+    });
+    addApiKey(state, provider.id, {
+      id: "credential-backup",
+      name: "Backup GPT",
+      secureCredentialReference: "credential-backup",
+    });
+    setActiveApiKey(state, provider.id, "credential-personal");
 
     expect(provider.apiKeys).toHaveLength(2);
-    expect(provider.activeApiKeyName).toBe("Personal GPT");
+    expect(provider.activeApiKeyId).toBe("credential-personal");
   });
 
   it("supports custom models and free-only filtering", () => {
@@ -61,5 +70,47 @@ describe("model registry", () => {
 
     expect(freeOnly).toHaveLength(1);
     expect(freeOnly[0].displayName).toBe("Free Model");
+  });
+
+  it("marks removed discovered models unavailable and excludes unknown pricing from free", () => {
+    const state = buildInitialState();
+    const zen = state.providers.find(
+      (provider) => provider.id === "opencode-zen",
+    );
+    if (!zen)
+      throw new Error("OpenCode Zen provider missing from initial state");
+
+    addDiscoveredModels(state, zen.id, [
+      {
+        id: "dynamic-model-a",
+        displayName: "Dynamic Model A",
+        free: "unknown",
+        apiFamily: "openai-chat",
+      },
+      {
+        id: "dynamic-model-b",
+        displayName: "Dynamic Model B",
+        free: true,
+      },
+    ]);
+    addDiscoveredModels(state, zen.id, [
+      {
+        id: "dynamic-model-b",
+        displayName: "Dynamic Model B",
+        free: true,
+      },
+    ]);
+
+    expect(
+      state.models.find((model) => model.id === "dynamic-model-a")?.available,
+    ).toBe(false);
+    expect(
+      getFilteredModels(state, { freeOnly: true }).some(
+        (model) => model.id === "dynamic-model-a",
+      ),
+    ).toBe(false);
+    expect(
+      state.models.find((model) => model.id === "dynamic-model-a")?.apiFamily,
+    ).toBe("openai-chat");
   });
 });

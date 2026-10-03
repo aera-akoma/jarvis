@@ -1,9 +1,12 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, safeStorage } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const { randomUUID } = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const Database = require("better-sqlite3");
+const { createCredentialStore } = require("./credentialStore.cjs");
+const modelProviders = require("./modelProviderRegistry.cjs");
 
 const isDev = !app.isPackaged;
 
@@ -26,50 +29,19 @@ function createDb() {
     )
   `,
   ).run();
+  db.prepare(
+    `CREATE TABLE IF NOT EXISTS credentials (
+      id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL,
+      encrypted_secret BLOB NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+  ).run();
   return db;
 }
 
 const db = createDb();
-
-function sanitizeProviderKeys(value) {
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(sanitizeProviderKeys);
-  }
-
-  const next = { ...value };
-  if (next.apiKeys && Array.isArray(next.apiKeys)) {
-    next.apiKeys = next.apiKeys.map((key) => ({ ...key }));
-  }
-  return next;
-}
-
-function maskSecret(secret) {
-  if (!secret) {
-    return secret;
-  }
-
-  try {
-    return Buffer.from(String(secret), "utf8").toString("base64");
-  } catch {
-    return secret;
-  }
-}
-
-function restoreSecret(secret) {
-  if (!secret) {
-    return secret;
-  }
-
-  try {
-    return Buffer.from(String(secret), "base64").toString("utf8");
-  } catch {
-    return secret;
-  }
-}
+const credentials = createCredentialStore({ db, safeStorage });
 
 function buildDefaultState() {
   return {
@@ -94,15 +66,8 @@ function buildDefaultState() {
         baseUrl: "https://example.com/v1",
         enabled: true,
         autoDiscovered: false,
-        activeApiKeyName: "Demo",
-        apiKeys: [
-          {
-            id: "demo-key",
-            name: "Demo",
-            value: "demo-key",
-            createdAt: new Date().toISOString(),
-          },
-        ],
+        activeApiKeyId: undefined,
+        apiKeys: [],
         createdAt: new Date().toISOString(),
       },
       {
@@ -113,7 +78,7 @@ function buildDefaultState() {
         baseUrl: "https://opencode.ai/zen/v1",
         enabled: true,
         autoDiscovered: false,
-        activeApiKeyName: undefined,
+        activeApiKeyId: undefined,
         apiKeys: [],
         createdAt: new Date().toISOString(),
       },
@@ -141,17 +106,6 @@ function buildDefaultState() {
         apiFormat: "openai-compatible",
         baseUrl: "https://example.com/v1",
       },
-      {
-        id: "deep-ask-free",
-        providerId: "opencode-zen",
-        displayName: "Deep Ask Free",
-        category: "cloud",
-        free: true,
-        capabilities: ["text", "chat", "cloud"],
-        available: true,
-        apiFormat: "openai-compatible",
-        baseUrl: "https://opencode.ai/zen/v1",
-      },
     ],
     conversations: [],
     selectedModelId: "qwen3-local",
@@ -166,40 +120,154 @@ function loadState() {
   if (!row) {
     const state = buildDefaultState();
     saveState(state);
-    return state;
+    return sanitizeState(state);
   }
-  return restoreKeysFromStorage(JSON.parse(row.payload));
+  const state = JSON.parse(row.payload);
+  const migrated = migrateLegacyCredentials(state);
+  const ensured = ensureBuiltinProviders(migrated.state);
+  const sanitized = sanitizeState(ensured.state);
+  if (migrated.changed || ensured.changed) {
+    saveState(sanitized);
+    db.pragma("secure_delete = ON");
+    db.pragma("wal_checkpoint(TRUNCATE)");
+    db.exec("VACUUM");
+  }
+  return sanitized;
 }
 
 function saveState(state) {
-  const sanitized = normalizeKeyBeforeSave(state);
+  const sanitized = sanitizeState(state);
   db.prepare(
     "INSERT INTO app_state (id, payload) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
   ).run("main", JSON.stringify(sanitized));
+  return sanitized;
 }
 
-function normalizeKeyBeforeSave(nextState) {
+function sanitizeState(nextState) {
   const clone = JSON.parse(JSON.stringify(nextState ?? buildDefaultState()));
-  clone.providers = (clone.providers ?? []).map((provider) => ({
-    ...provider,
-    apiKeys: (provider.apiKeys ?? []).map((key) => ({
-      ...key,
-      value: maskSecret(key.value),
-    })),
-  }));
+  clone.providers = (clone.providers ?? []).map((provider) => {
+    const { activeApiKeyName: _legacyActiveKeyName, ...providerMetadata } =
+      provider;
+    return {
+      ...providerMetadata,
+      apiKeys: (provider.apiKeys ?? []).map((key) => ({
+        id: key.id ?? randomUUID(),
+        providerId: provider.id,
+        name: String(key.name ?? "Credential"),
+        secureCredentialReference:
+          key.secureCredentialReference ?? key.id ?? "",
+        createdAt: key.createdAt ?? new Date().toISOString(),
+        updatedAt: key.updatedAt ?? key.createdAt ?? new Date().toISOString(),
+      })),
+      activeApiKeyId: provider.activeApiKeyId,
+    };
+  });
   return clone;
 }
 
-function restoreKeysFromStorage(nextState) {
-  const clone = JSON.parse(JSON.stringify(nextState ?? buildDefaultState()));
-  clone.providers = (clone.providers ?? []).map((provider) => ({
-    ...provider,
-    apiKeys: (provider.apiKeys ?? []).map((key) => ({
-      ...key,
-      value: restoreSecret(key.value),
-    })),
-  }));
-  return clone;
+function ensureBuiltinProviders(nextState) {
+  const state = JSON.parse(JSON.stringify(nextState ?? buildDefaultState()));
+  if (!state.providers.some((provider) => provider.id === "opencode-zen")) {
+    state.providers.push({
+      id: "opencode-zen",
+      name: "OpenCode Zen",
+      type: "cloud",
+      apiFormat: "openai-compatible",
+      baseUrl: "https://opencode.ai/zen/v1",
+      enabled: true,
+      autoDiscovered: false,
+      activeApiKeyId: undefined,
+      apiKeys: [],
+      createdAt: new Date().toISOString(),
+    });
+    return { state, changed: true };
+  }
+  return { state, changed: false };
+}
+
+function decodeLegacySecret(value) {
+  let secret = String(value ?? "");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        secret,
+      )
+    ) {
+      break;
+    }
+    const decoded = Buffer.from(secret, "base64").toString("utf8");
+    const containsControlCharacter = [...decoded].some((character) => {
+      const code = character.charCodeAt(0);
+      return (
+        (code >= 0 && code <= 8) || (code >= 14 && code <= 31) || code === 127
+      );
+    });
+    if (!decoded || decoded.includes("\uFFFD") || containsControlCharacter) {
+      break;
+    }
+    secret = decoded;
+  }
+  return secret;
+}
+
+function migrateLegacyCredentials(nextState) {
+  let changed = false;
+  const migrated = JSON.parse(JSON.stringify(nextState ?? buildDefaultState()));
+  migrated.providers = (migrated.providers ?? []).map((provider) => {
+    let migratedActiveKeyId = provider.activeApiKeyId;
+    const apiKeys = (provider.apiKeys ?? []).flatMap((key) => {
+      if (typeof key.value !== "string" || !key.value) {
+        return key.secureCredentialReference
+          ? [{ ...key, providerId: provider.id }]
+          : [];
+      }
+
+      changed = true;
+      const credentialId =
+        key.secureCredentialReference ?? key.id ?? randomUUID();
+      if (key.name === provider.activeApiKeyName)
+        migratedActiveKeyId = credentialId;
+      try {
+        credentials.store({
+          credentialId,
+          providerId: provider.id,
+          secret: decodeLegacySecret(key.value),
+        });
+      } catch {
+        return [];
+      }
+
+      return [
+        {
+          id: credentialId,
+          providerId: provider.id,
+          name: key.name ?? "Imported credential",
+          secureCredentialReference: credentialId,
+          createdAt: key.createdAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ];
+    });
+    return {
+      ...provider,
+      activeApiKeyId: migratedActiveKeyId,
+      apiKeys,
+    };
+  });
+  return { state: migrated, changed };
+}
+
+function findProviderCredential(provider, requestedId) {
+  const keyId = requestedId ?? provider.activeApiKeyId;
+  if (!keyId) return "";
+  const metadata = provider.apiKeys.find(
+    (key) => key.id === keyId || key.secureCredentialReference === keyId,
+  );
+  if (!metadata?.secureCredentialReference) return "";
+  return credentials.getSecret({
+    credentialId: metadata.secureCredentialReference,
+    providerId: provider.id,
+  });
 }
 
 function validatePowerShellCommand(command) {
@@ -321,14 +389,63 @@ async function discoverLocalModels() {
 }
 
 ipcMain.handle("app:load", () => {
-  const state = loadState();
-  return sanitizeProviderKeys(state);
+  return loadState();
 });
 
 ipcMain.handle("app:save", (_, state) => {
-  const normalizedState = normalizeKeyBeforeSave(state);
-  saveState(normalizedState);
-  return normalizedState;
+  return saveState(state);
+});
+
+ipcMain.handle("credentials:store", (_, entry) => {
+  const state = loadState();
+  if (!state.providers.some((provider) => provider.id === entry?.providerId)) {
+    throw new Error("Provider was not found.");
+  }
+  credentials.store(entry ?? {});
+  return { ok: true };
+});
+
+ipcMain.handle("credentials:delete", (_, entry) => {
+  credentials.delete(entry ?? {});
+  return { ok: true };
+});
+
+ipcMain.handle("providers:test-connection", async (_, request) => {
+  const state = loadState();
+  const provider = state.providers.find(
+    (entry) => entry.id === request?.providerId,
+  );
+  if (!provider) throw new Error("Provider was not found.");
+  const apiKey = findProviderCredential(provider, request?.credentialId);
+  return modelProviders.testConnection({ provider, apiKey });
+});
+
+ipcMain.handle("providers:discover-models", async (_, request) => {
+  const state = loadState();
+  const provider = state.providers.find(
+    (entry) => entry.id === request?.providerId,
+  );
+  if (!provider) throw new Error("Provider was not found.");
+  const apiKey = findProviderCredential(provider, request?.credentialId);
+  return modelProviders.discoverModels({ provider, apiKey });
+});
+
+ipcMain.handle("models:generate", async (_, request) => {
+  const state = loadState();
+  const model = state.models.find((entry) => entry.id === request?.modelId);
+  if (!model)
+    throw new Error("The selected model is no longer in the registry.");
+  const provider = state.providers.find(
+    (entry) => entry.id === model.providerId,
+  );
+  if (!provider) throw new Error("The selected model provider was not found.");
+  const apiKey = findProviderCredential(provider, request?.credentialId);
+  return modelProviders.generateModel({
+    provider,
+    model,
+    messages: request?.messages,
+    apiKey,
+  });
 });
 
 ipcMain.handle("providers:discover-local", async () => discoverLocalModels());

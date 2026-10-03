@@ -1,11 +1,20 @@
 export type ModelCategory = "local" | "cloud" | "custom";
 export type ProviderType = "local" | "cloud";
+export type ModelApiFamily =
+  | "openai-chat"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "google-generative"
+  | "system-one"
+  | "unknown";
 
 export interface ApiKey {
   id: string;
+  providerId: string;
   name: string;
-  value: string;
+  secureCredentialReference: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface Provider {
@@ -16,7 +25,7 @@ export interface Provider {
   baseUrl: string;
   enabled: boolean;
   autoDiscovered: boolean;
-  activeApiKeyName?: string;
+  activeApiKeyId?: string;
   apiKeys: ApiKey[];
   createdAt: string;
 }
@@ -26,11 +35,28 @@ export interface ModelDefinition {
   providerId: string;
   displayName: string;
   category: ModelCategory;
-  free: boolean;
+  free: boolean | "unknown";
   capabilities: string[];
   available: boolean;
   apiFormat: string;
   baseUrl?: string;
+  apiFamily?: ModelApiFamily;
+  endpoint?: string;
+  contextLength?: number;
+  pricing?: Record<string, number | string | undefined>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ModelRequestMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface ModelGenerationResult {
+  ok: boolean;
+  modelId: string;
+  providerId: string;
+  content: string;
 }
 
 export interface Message {
