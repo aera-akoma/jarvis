@@ -2,9 +2,11 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { generateModel } = require("./modelProviderRegistry.cjs") as {
-  generateModel: (request: any) => Promise<any>;
-};
+const { discoverModels, generateModel } =
+  require("./modelProviderRegistry.cjs") as {
+    discoverModels: (request: any) => Promise<any[]>;
+    generateModel: (request: any) => Promise<any>;
+  };
 
 describe("provider-neutral model adapter registry", () => {
   it("routes Zen models by catalog API family without returning credentials", async () => {
@@ -75,5 +77,70 @@ describe("provider-neutral model adapter registry", () => {
 
     expect(requestUrl).toBe("http://localhost:11434/api/chat");
     expect(result.content).toBe("Local response");
+  });
+
+  it("discovers Inference models without sending Authorization", async () => {
+    let requestUrl = "";
+    let requestHeaders: Record<string, string> = {};
+    const models = await discoverModels({
+      provider: {
+        id: "opencode-inference",
+        name: "OpenCode Inference",
+        enabled: true,
+      },
+      fetchImpl: async (url: string, options: any) => {
+        requestUrl = url;
+        requestHeaders = options.headers;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ id: "fledge-alpha-free", object: "model" }],
+          }),
+        };
+      },
+    });
+
+    expect(requestUrl).toBe("https://opencode.ai/inference/v1/models");
+    expect(requestHeaders.Authorization).toBeUndefined();
+    expect(models[0].id).toBe("fledge-alpha-free");
+  });
+
+  it("dispatches Inference chat without an API key and leaves Zen routing separate", async () => {
+    let requestUrl = "";
+    let requestHeaders: Record<string, string> = {};
+    const result = await generateModel({
+      provider: {
+        id: "opencode-inference",
+        name: "OpenCode Inference",
+        type: "cloud",
+        enabled: true,
+      },
+      model: {
+        id: "fledge-alpha-free",
+        providerId: "opencode-inference",
+        available: true,
+        apiFamily: "openai-chat",
+        authentication: "none",
+      },
+      messages: [{ role: "user", content: "Hello" }],
+      fetchImpl: async (url: string, options: any) => {
+        requestUrl = url;
+        requestHeaders = options.headers;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [{ message: { content: "Inference response" } }],
+          }),
+        };
+      },
+    });
+
+    expect(requestUrl).toBe(
+      "https://opencode.ai/inference/openai/v1/chat/completions",
+    );
+    expect(requestHeaders.Authorization).toBeUndefined();
+    expect(result.content).toBe("Inference response");
   });
 });

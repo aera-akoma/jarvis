@@ -27,6 +27,14 @@ The model selector groups entries by provider. The normal Go action sends conver
 
 Streaming is not currently implemented; the existing chat interface and IPC are request/response based. Unsupported or undocumented model protocols fail with a user-safe message rather than being forced through Chat Completions.
 
+## OpenCode Inference
+
+OpenCode Inference is a separate provider (`opencode-inference`) and adapter from OpenCode Zen. Its model list is refreshed from `https://opencode.ai/inference/v1/models` without authentication. The catalog currently exposes IDs/ownership but does not provide pricing or family fields, so Jarvis preserves unknown pricing and derives only documented API-family classes. A small maintained classification identifies documented free models and their no-auth requirement; it does not seed model entries or replace live discovery.
+
+The current implementation executes only OpenAI Chat Completions at `https://opencode.ai/inference/openai/v1/chat/completions`. Requests for free models documented as no-auth omit Authorization. Other models are marked as requiring an API key and use the existing encrypted credential store. GPT/Responses, Claude/Qwen Messages, and Gemini models are discovered with their documented family/endpoints but are intentionally not executed yet; unknown families are likewise rejected before network access. The public Console per-model endpoint table may require a signed-in Console session, so IDs without a published class remain `unknown` instead of being guessed.
+
+OpenCode can restrict specific free models to use within OpenCode itself. Jarvis reports that provider policy denial and does not retry with credentials or route around it. Streaming is not implemented.
+
 ### Security
 
 - `safeStorage` must report OS encryption available before a credential is stored or read; Jarvis does not fall back to plaintext or Base64 storage.

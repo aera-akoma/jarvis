@@ -113,4 +113,21 @@ describe("model registry", () => {
       state.models.find((model) => model.id === "dynamic-model-a")?.apiFamily,
     ).toBe("openai-chat");
   });
+
+  it("registers OpenCode Inference separately without seeding model IDs", () => {
+    const state = buildInitialState();
+    expect(
+      state.providers.find((provider) => provider.id === "opencode-zen"),
+    ).toBeDefined();
+    expect(
+      state.providers.find((provider) => provider.id === "opencode-inference"),
+    ).toMatchObject({
+      name: "OpenCode Inference",
+      baseUrl: "https://opencode.ai/inference",
+      apiFormat: "openai-compatible",
+    });
+    expect(
+      state.models.some((model) => model.providerId === "opencode-inference"),
+    ).toBe(false);
+  });
 });

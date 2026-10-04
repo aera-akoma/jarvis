@@ -7,6 +7,7 @@ export type ModelApiFamily =
   | "google-generative"
   | "system-one"
   | "unknown";
+export type ModelAuthentication = "none" | "api-key";
 
 export interface ApiKey {
   id: string;
@@ -45,6 +46,7 @@ export interface ModelDefinition {
   contextLength?: number;
   pricing?: Record<string, number | string | undefined>;
   metadata?: Record<string, unknown>;
+  authentication?: ModelAuthentication;
 }
 
 export interface ModelRequestMessage {

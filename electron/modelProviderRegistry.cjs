@@ -1,4 +1,5 @@
 const zen = require("./opencodeZenAdapter.cjs");
+const inference = require("./openCodeInferenceAdapter.cjs");
 
 function safeStatusMessage(status) {
   if (status === 401 || status === 403)
@@ -50,6 +51,14 @@ function openAIChatUrl(baseUrl) {
 
 async function testConnection({ provider, apiKey, fetchImpl = fetch }) {
   if (!provider?.enabled) throw new Error("This provider is disabled.");
+  if (provider.id === inference.PROVIDER_ID) {
+    const models = await inference.discoverInferenceModels({ fetchImpl });
+    return {
+      ok: true,
+      count: models.length,
+      message: `OpenCode Inference connected and discovered ${models.length} models.`,
+    };
+  }
   if (provider.id === "opencode-zen") {
     if (!apiKey) throw new Error("Add an OpenCode Zen API key first.");
     return zen.testZenConnection({ apiKey, fetchImpl });
@@ -67,6 +76,9 @@ async function testConnection({ provider, apiKey, fetchImpl = fetch }) {
 }
 
 async function discoverModels({ provider, apiKey, fetchImpl = fetch }) {
+  if (provider.id === inference.PROVIDER_ID) {
+    return inference.discoverInferenceModels({ fetchImpl });
+  }
   if (provider.id !== "opencode-zen") {
     throw new Error(
       "Dynamic cloud discovery is not supported for this provider.",
@@ -93,6 +105,14 @@ async function generateModel({
     if (!apiKey)
       throw new Error("Add or select an OpenCode Zen API key first.");
     return zen.generateZen({ apiKey, model, messages, fetchImpl });
+  }
+  if (provider.id === inference.PROVIDER_ID) {
+    return inference.generateInferenceModel({
+      model,
+      messages,
+      apiKey,
+      fetchImpl,
+    });
   }
 
   const baseUrl = providerBaseUrl(provider, model);

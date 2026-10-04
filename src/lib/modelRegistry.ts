@@ -7,6 +7,7 @@ import type {
   ProviderDraft,
 } from "./types";
 import { buildProviderConfig } from "./opencodeZen";
+import { buildOpenCodeInferenceProviderConfig } from "./openCodeInference";
 
 const uid = (prefix: string) =>
   `${prefix}-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
@@ -38,6 +39,14 @@ export const buildInitialState = (): AppState => ({
     },
     {
       ...buildProviderConfig(),
+      enabled: true,
+      autoDiscovered: false,
+      activeApiKeyId: undefined,
+      apiKeys: [],
+      createdAt: new Date().toISOString(),
+    },
+    {
+      ...buildOpenCodeInferenceProviderConfig(),
       enabled: true,
       autoDiscovered: false,
       activeApiKeyId: undefined,

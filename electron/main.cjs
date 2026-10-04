@@ -82,6 +82,18 @@ function buildDefaultState() {
         apiKeys: [],
         createdAt: new Date().toISOString(),
       },
+      {
+        id: "opencode-inference",
+        name: "OpenCode Inference",
+        type: "cloud",
+        apiFormat: "openai-compatible",
+        baseUrl: "https://opencode.ai/inference",
+        enabled: true,
+        autoDiscovered: false,
+        activeApiKeyId: undefined,
+        apiKeys: [],
+        createdAt: new Date().toISOString(),
+      },
     ],
     models: [
       {
@@ -167,22 +179,34 @@ function sanitizeState(nextState) {
 
 function ensureBuiltinProviders(nextState) {
   const state = JSON.parse(JSON.stringify(nextState ?? buildDefaultState()));
-  if (!state.providers.some((provider) => provider.id === "opencode-zen")) {
-    state.providers.push({
+  const builtins = [
+    {
       id: "opencode-zen",
       name: "OpenCode Zen",
+      baseUrl: "https://opencode.ai/zen/v1",
+    },
+    {
+      id: "opencode-inference",
+      name: "OpenCode Inference",
+      baseUrl: "https://opencode.ai/inference",
+    },
+  ];
+  let changed = false;
+  for (const provider of builtins) {
+    if (state.providers.some((entry) => entry.id === provider.id)) continue;
+    state.providers.push({
+      ...provider,
       type: "cloud",
       apiFormat: "openai-compatible",
-      baseUrl: "https://opencode.ai/zen/v1",
       enabled: true,
       autoDiscovered: false,
       activeApiKeyId: undefined,
       apiKeys: [],
       createdAt: new Date().toISOString(),
     });
-    return { state, changed: true };
+    changed = true;
   }
-  return { state, changed: false };
+  return { state, changed };
 }
 
 function decodeLegacySecret(value) {
@@ -416,7 +440,10 @@ ipcMain.handle("providers:test-connection", async (_, request) => {
     (entry) => entry.id === request?.providerId,
   );
   if (!provider) throw new Error("Provider was not found.");
-  const apiKey = findProviderCredential(provider, request?.credentialId);
+  const apiKey =
+    provider.id === "opencode-inference"
+      ? ""
+      : findProviderCredential(provider, request?.credentialId);
   return modelProviders.testConnection({ provider, apiKey });
 });
 
@@ -426,7 +453,10 @@ ipcMain.handle("providers:discover-models", async (_, request) => {
     (entry) => entry.id === request?.providerId,
   );
   if (!provider) throw new Error("Provider was not found.");
-  const apiKey = findProviderCredential(provider, request?.credentialId);
+  const apiKey =
+    provider.id === "opencode-inference"
+      ? ""
+      : findProviderCredential(provider, request?.credentialId);
   return modelProviders.discoverModels({ provider, apiKey });
 });
 
@@ -439,7 +469,10 @@ ipcMain.handle("models:generate", async (_, request) => {
     (entry) => entry.id === model.providerId,
   );
   if (!provider) throw new Error("The selected model provider was not found.");
-  const apiKey = findProviderCredential(provider, request?.credentialId);
+  const apiKey =
+    model.authentication === "none"
+      ? ""
+      : findProviderCredential(provider, request?.credentialId);
   return modelProviders.generateModel({
     provider,
     model,

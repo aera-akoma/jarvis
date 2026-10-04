@@ -17,6 +17,10 @@ import {
   validateModelCapabilities,
 } from "./lib/agentRuntime";
 import { buildProviderConfig, OPENCODE_PROVIDER_ID } from "./lib/opencodeZen";
+import {
+  buildOpenCodeInferenceProviderConfig,
+  OPENCODE_INFERENCE_PROVIDER_ID,
+} from "./lib/openCodeInference";
 import { generateModel } from "./lib/modelRequest";
 import { buildResearchPlan, summarizeDocument } from "./lib/research";
 import { MemoryStore, suggestSkills } from "./lib/memory";
@@ -112,6 +116,7 @@ function App() {
   >("all");
   const [modelSearch, setModelSearch] = useState("");
   const [zenConnectionStatus, setZenConnectionStatus] = useState("Not tested");
+  const [inferenceStatus, setInferenceStatus] = useState("Not refreshed");
   const [status, setStatus] = useState("Ready");
   const [toolApproved, setToolApproved] = useState(false);
   const [toolConsole, setToolConsole] = useState<string[]>(["Tooling ready."]);
@@ -273,6 +278,67 @@ function App() {
         error instanceof Error
           ? error.message
           : "OpenCode Zen connection test failed.",
+      );
+    }
+  };
+
+  const ensureOpenCodeInferenceProvider = async () => {
+    const existing = getProviderById(state, OPENCODE_INFERENCE_PROVIDER_ID);
+    if (existing) return existing;
+
+    const nextState = { ...state };
+    const provider = addProvider(nextState, {
+      ...buildOpenCodeInferenceProviderConfig(),
+    });
+    await persistState(nextState);
+    return provider;
+  };
+
+  const handleRefreshInferenceModels = async () => {
+    if (!window.electronAPI) {
+      setStatus("Model discovery is available in the Jarvis desktop app.");
+      return;
+    }
+
+    const provider = await ensureOpenCodeInferenceProvider();
+    try {
+      const discovered = await window.electronAPI.discoverProviderModels({
+        providerId: provider.id,
+      });
+      const nextState = { ...state };
+      addDiscoveredModels(nextState, provider.id, discovered);
+      await persistState(nextState);
+      setInferenceStatus(`${discovered.length} models discovered`);
+      setStatus(`Loaded ${discovered.length} OpenCode Inference models.`);
+    } catch (error) {
+      setInferenceStatus("Refresh failed");
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "OpenCode Inference discovery failed.",
+      );
+    }
+  };
+
+  const handleTestInferenceCatalog = async () => {
+    if (!window.electronAPI) {
+      setStatus("Connection testing is available in the Jarvis desktop app.");
+      return;
+    }
+
+    const provider = await ensureOpenCodeInferenceProvider();
+    try {
+      const result = await window.electronAPI.testProviderConnection({
+        providerId: provider.id,
+      });
+      setInferenceStatus("Reachable");
+      setStatus(result.message);
+    } catch (error) {
+      setInferenceStatus("Unavailable");
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "OpenCode Inference is unavailable.",
       );
     }
   };
@@ -731,10 +797,14 @@ function App() {
                 <select
                   value={selectedModel?.id ?? ""}
                   onChange={(event) => {
+                    const nextModel = state.models.find(
+                      (model) => model.id === event.target.value,
+                    );
                     setState((prev) => ({
                       ...prev,
                       selectedModelId: event.target.value,
                     }));
+                    if (nextModel) setSelectedProviderId(nextModel.providerId);
                   }}
                 >
                   {state.providers.map((provider) => {
@@ -1110,84 +1180,128 @@ function App() {
               </button>
             </div>
 
-            <div className="settings-section">
-              <h3>API Keys</h3>
-              <select
-                value={selectedProviderId}
-                onChange={(event) => setSelectedProviderId(event.target.value)}
-              >
-                {state.providers.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
+            {!(
+              selectedModel?.providerId === OPENCODE_INFERENCE_PROVIDER_ID &&
+              selectedModel.authentication === "none"
+            ) && (
+              <div className="settings-section">
+                <h3>API Keys</h3>
+                <select
+                  value={selectedProviderId}
+                  onChange={(event) =>
+                    setSelectedProviderId(event.target.value)
+                  }
+                >
+                  {state.providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </select>
 
-              <div className="field-row stacked">
-                <input
-                  value={apiKeyName}
-                  onChange={(event) => setApiKeyName(event.target.value)}
-                  placeholder="Key name"
-                />
-                <input
-                  type="password"
-                  ref={apiKeyValueRef}
-                  placeholder="Secret API key"
-                  autoComplete="new-password"
-                />
-              </div>
-              <button
-                type="button"
-                className="primary"
-                onClick={addApiKeyEntry}
-              >
-                + Add API Key
-              </button>
+                <div className="field-row stacked">
+                  <input
+                    value={apiKeyName}
+                    onChange={(event) => setApiKeyName(event.target.value)}
+                    placeholder="Key name"
+                  />
+                  <input
+                    type="password"
+                    ref={apiKeyValueRef}
+                    placeholder="Secret API key"
+                    autoComplete="new-password"
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={addApiKeyEntry}
+                >
+                  + Add API Key
+                </button>
 
-              {state.providers
-                .find((provider) => provider.id === selectedProviderId)
-                ?.apiKeys.map((key) => (
-                  <div key={key.id} className="key-row">
-                    <div>
-                      <strong>{key.name}</strong>
-                      <span>••••••••••••</span>
+                {state.providers
+                  .find((provider) => provider.id === selectedProviderId)
+                  ?.apiKeys.map((key) => (
+                    <div key={key.id} className="key-row">
+                      <div>
+                        <strong>{key.name}</strong>
+                        <span>••••••••••••</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() =>
+                          updateActiveKey(selectedProviderId, key.id)
+                        }
+                      >
+                        {state.providers.find(
+                          (provider) => provider.id === selectedProviderId,
+                        )?.activeApiKeyId === key.id
+                          ? "Active"
+                          : "Use"}
+                      </button>
+                      {selectedProviderId !==
+                        OPENCODE_INFERENCE_PROVIDER_ID && (
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => testApiKey(selectedProviderId, key.id)}
+                        >
+                          Test
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => renameApiKey(selectedProviderId, key.id)}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => deleteApiKey(selectedProviderId, key.id)}
+                      >
+                        Delete
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() =>
-                        updateActiveKey(selectedProviderId, key.id)
-                      }
-                    >
-                      {state.providers.find(
-                        (provider) => provider.id === selectedProviderId,
-                      )?.activeApiKeyId === key.id
-                        ? "Active"
-                        : "Use"}
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => testApiKey(selectedProviderId, key.id)}
-                    >
-                      Test
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => renameApiKey(selectedProviderId, key.id)}
-                    >
-                      Rename
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => deleteApiKey(selectedProviderId, key.id)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                ))}
+                  ))}
+              </div>
+            )}
+
+            <div className="settings-section">
+              <h3>OpenCode Inference</h3>
+              <p>Status: {inferenceStatus}</p>
+              <p>
+                {
+                  state.models.filter(
+                    (model) =>
+                      model.providerId === OPENCODE_INFERENCE_PROVIDER_ID,
+                  ).length
+                }{" "}
+                models discovered
+              </p>
+              <div className="tool-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={handleTestInferenceCatalog}
+                >
+                  Test Catalog
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={handleRefreshInferenceModels}
+                >
+                  Refresh Models
+                </button>
+              </div>
+              {selectedModel?.providerId === OPENCODE_INFERENCE_PROVIDER_ID &&
+                selectedModel.authentication === "none" && (
+                  <p>Selected model does not require an API key.</p>
+                )}
             </div>
 
             {selectedProviderId === OPENCODE_PROVIDER_ID && (
