@@ -23,7 +23,7 @@ class OpenCodeClient:
         if api_key is None and not (os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY")):
             try:
                 stored_key = CredentialStore().get("OpenAI")
-            except OSError:
+            except (OSError, RuntimeError):
                 stored_key = None
         self.api_key = api_key or os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY") or stored_key
         self.session_id: str | None = None

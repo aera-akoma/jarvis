@@ -29,14 +29,16 @@ def _dpapi(data: bytes, *, decrypt: bool) -> bytes:
         function.argtypes = [ctypes.POINTER(DataBlob), ctypes.POINTER(ctypes.wintypes.LPWSTR),
                              ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
                              ctypes.wintypes.DWORD, ctypes.POINTER(DataBlob)]
-        success = function(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(destination))
     else:
         function = crypt32.CryptProtectData
         function.argtypes = [ctypes.POINTER(DataBlob), ctypes.wintypes.LPCWSTR,
                              ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
                              ctypes.wintypes.DWORD, ctypes.POINTER(DataBlob)]
-        success = function(ctypes.byref(source), "Jarvis credential", None, None, None, 0x1, ctypes.byref(destination))
     function.restype = ctypes.wintypes.BOOL
+    if decrypt:
+        success = function(ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(destination))
+    else:
+        success = function(ctypes.byref(source), "Jarvis credential", None, None, None, 0x1, ctypes.byref(destination))
     if not success:
         raise OSError(ctypes.get_last_error(), "Windows could not access the protected credential.")
     try:
@@ -67,15 +69,20 @@ class CredentialStore:
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("format") != _FORMAT or payload.get("version") != 1 or not isinstance(payload.get("entries"), dict):
+            if isinstance(payload, dict) and payload.get("format") == _FORMAT and payload.get("version") == 1 and isinstance(payload.get("entries"), dict):
+                encrypted_entries = payload["entries"]
+            elif isinstance(payload, dict) and all(isinstance(value, str) for value in payload.values()):
+                # Migrate the previous Windows format only if every value decrypts with DPAPI.
+                encrypted_entries = payload
+            else:
                 raise ValueError("Credential file is not in the protected Jarvis format.")
             self._store = {
                 str(key): base64.b64encode(_dpapi(base64.b64decode(value, validate=True), decrypt=True)).decode("ascii")
-                for key, value in payload["entries"].items()
+                for key, value in encrypted_entries.items()
                 if isinstance(value, str)
             }
-            # Cache decrypted bytes only in memory as base64; they are never written back as plaintext.
-            self._store = {key: base64.b64encode(base64.b64decode(value)).decode("ascii") for key, value in self._store.items()}
+            if payload.get("format") != _FORMAT:
+                self._save()
         except Exception:
             self._store.clear()
             self.storage_error = (
@@ -107,8 +114,16 @@ class CredentialStore:
     def set(self, key: str, value: str) -> None:
         self._require_available()
         # Keep a base64 representation only in process memory to avoid accidental text serialization.
+        old_value = self._store.get(key)
         self._store[key] = base64.b64encode(value.encode("utf-8")).decode("ascii")
-        self._save()
+        try:
+            self._save()
+        except Exception:
+            if old_value is None:
+                self._store.pop(key, None)
+            else:
+                self._store[key] = old_value
+            raise
 
     def get(self, key: str) -> str | None:
         self._require_available()
@@ -122,5 +137,10 @@ class CredentialStore:
 
     def delete(self, key: str) -> None:
         self._require_available()
-        self._store.pop(key, None)
-        self._save()
+        old_value = self._store.pop(key, None)
+        try:
+            self._save()
+        except Exception:
+            if old_value is not None:
+                self._store[key] = old_value
+            raise

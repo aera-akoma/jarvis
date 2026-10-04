@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
@@ -28,7 +29,8 @@ def install_exception_logging(log_path: Path, notify: Callable[[str], None] | No
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
-        logger.critical("Uncaught application exception", exc_info=(exc_type, exc_value, exc_traceback))
+        frames = "".join(traceback.format_tb(exc_traceback))
+        logger.critical("Uncaught application exception (%s)\n%s", exc_type.__name__, frames)
         if notify:
             notify(f"Jarvis encountered an unexpected error. Details were saved to:\n{log_path}")
 

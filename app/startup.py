@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 import os
+from pathlib import Path
 
 
 class StartupManager:
     def __init__(self, startup_dir: str | None = None) -> None:
         if startup_dir is None:
-            startup_dir = str(Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup")
+            roaming = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming"))
+            startup_dir = str(roaming / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup")
         self.startup_dir = Path(startup_dir)
         self.startup_dir.mkdir(parents=True, exist_ok=True)
         self.startup_file = self.startup_dir / "Jarvis-startup.cmd"

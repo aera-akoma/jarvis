@@ -78,7 +78,8 @@ class SettingsWindow(QDialog):
 
         layout.addLayout(buttons)
 
-        status = QLabel("Credentials are stored securely in the OS credential store.")
+        status_text = self.credentials.storage_error or "Credentials are stored using Windows DPAPI protected storage."
+        status = QLabel(status_text)
         layout.addWidget(status)
 
     def _ask_passphrase(self, title: str, prompt: str) -> str | None:
@@ -174,7 +175,11 @@ class SettingsWindow(QDialog):
             os.environ.pop("JARVIS_OPENAI_BASE_URL", None)
 
         if self.api_key_input.text().strip():
-            self.credentials.set("OpenAI", self.api_key_input.text().strip())
+            try:
+                self.credentials.set("OpenAI", self.api_key_input.text().strip())
+            except (OSError, RuntimeError) as exc:
+                QMessageBox.critical(self, "Secure storage unavailable", str(exc))
+                return
             os.environ["OPENCODE_API_KEY"] = self.api_key_input.text().strip()
             QMessageBox.information(self, "Saved", "Your API key has been stored securely.")
 
@@ -185,6 +190,10 @@ class SettingsWindow(QDialog):
         self.close()
 
     def clear_key(self) -> None:
-        self.credentials.delete("OpenAI")
+        try:
+            self.credentials.delete("OpenAI")
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.critical(self, "Could not clear credential", str(exc))
+            return
         self.api_key_input.clear()
         QMessageBox.information(self, "Removed", "The stored API key has been cleared.")
