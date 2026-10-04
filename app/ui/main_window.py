@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMessageBox,
+    QInputDialog,
     QPushButton,
     QTextBrowser,
     QVBoxLayout,
@@ -36,6 +37,10 @@ from app.tooling import ToolRegistry
 from app.ui.memory_view import MemoryView
 from app.ui.settings_window import SettingsWindow
 from app.voice.voice_manager import VoiceManager
+from app.workflows.workflow_manager import WorkflowManager
+from app.ui.workflow_view import WorkflowView
+from app.ui.search_view import SearchView
+from app.permissions.policy import PermissionPolicy
 
 
 class AgentWorker(QThread):
@@ -66,6 +71,60 @@ class AgentWorker(QThread):
         self.result_ready.emit(result)
 
 
+class WorkflowWorker(QThread):
+    result_ready = Signal(object)
+    confirmation_requested = Signal(object)
+
+    def __init__(self, manager: WorkflowManager, workflow_id: str, registry: ToolRegistry, policy: PermissionPolicy) -> None:
+        super().__init__()
+        self.manager, self.workflow_id, self.registry, self.policy = manager, workflow_id, registry, policy
+        self._cancel_requested = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_requested.set()
+
+    def _confirm(self, tool: str, arguments: dict, level: str) -> bool:
+        response = {"tool": tool, "arguments": arguments, "level": level, "event": threading.Event(), "approved": False}
+        self.confirmation_requested.emit(response)
+        response["event"].wait()
+        return bool(response["approved"])
+
+    def run(self) -> None:
+        self.result_ready.emit(self.manager.execute_workflow(
+            self.workflow_id, registry=self.registry, permission_policy=self.policy, confirm_step=self._confirm,
+            should_cancel=self._cancel_requested.is_set,
+        ))
+
+
+class SpeechInputWorker(QThread):
+    result_ready = Signal(object)
+
+    def __init__(self, voice_manager: VoiceManager) -> None:
+        super().__init__()
+        self.voice_manager = voice_manager
+
+    def run(self) -> None:
+        try:
+            self.result_ready.emit({"success": True, "transcript": self.voice_manager.listen_and_transcribe()})
+        except Exception as exc:
+            self.result_ready.emit({"success": False, "error": str(exc)})
+
+
+class SpeechOutputWorker(QThread):
+    result_ready = Signal(object)
+
+    def __init__(self, voice_manager: VoiceManager, text: str) -> None:
+        super().__init__()
+        self.voice_manager, self.text = voice_manager, text
+
+    def run(self) -> None:
+        try:
+            self.voice_manager.speak(self.text)
+            self.result_ready.emit({"success": True})
+        except Exception as exc:
+            self.result_ready.emit({"success": False, "error": str(exc)})
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: Optional[AppConfig] = None) -> None:
         if QApplication.instance() is None:
@@ -78,8 +137,16 @@ class MainWindow(QMainWindow):
         self.memory_manager = MemoryManager(self.config.database_path)
         self.memory_candidate_extractor = MemoryCandidateExtractor()
         self.pending_memory_candidates: list[dict] = []
-        self.search_manager = SearchManager()
+        self.workflow_manager = WorkflowManager(self.config.database_path)
+        self.workflow_worker: WorkflowWorker | None = None
+        self.search_manager = SearchManager(self.config.database_path)
         self.voice_manager = VoiceManager()
+        configured_voice_output = self.settings_manager.get("voice_output", "false").lower() == "true"
+        if configured_voice_output:
+            self.voice_manager.enable_speech()
+        self.voice_output_enabled = configured_voice_output and self.voice_manager.text_to_speech_available()
+        self.speech_input_worker: SpeechInputWorker | None = None
+        self.speech_output_worker: SpeechOutputWorker | None = None
         self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
         self.windows_controller = WindowsController()
         self.agent_loop: AgentLoop | None = None
@@ -147,6 +214,10 @@ class MainWindow(QMainWindow):
         memory_button.clicked.connect(self.show_memory)
         sidebar_layout.addWidget(memory_button)
 
+        workflows_button = QPushButton("↻ Workflows")
+        workflows_button.clicked.connect(self.show_workflows)
+        sidebar_layout.addWidget(workflows_button)
+
         root_layout.addWidget(sidebar, 30)
 
         content = QFrame()
@@ -187,6 +258,8 @@ class MainWindow(QMainWindow):
         attach = QPushButton("📎")
         voice = QPushButton("🎤")
         voice.clicked.connect(self.show_voice_status)
+        self.voice_output_button = QPushButton("🔊 Voice: On" if self.voice_output_enabled else "🔊 Voice: Off")
+        self.voice_output_button.clicked.connect(self.toggle_voice_output)
         search = QPushButton("Search")
         search.clicked.connect(self.show_search)
         self.prompt_input = QLineEdit()
@@ -201,6 +274,7 @@ class MainWindow(QMainWindow):
 
         composer_layout.addWidget(attach)
         composer_layout.addWidget(voice)
+        composer_layout.addWidget(self.voice_output_button)
         composer_layout.addWidget(search)
         composer_layout.addWidget(self.prompt_input, 1)
         composer_layout.addWidget(self.model_selector)
@@ -250,13 +324,8 @@ class MainWindow(QMainWindow):
         if self.agent_worker is not None and self.agent_worker.isRunning():
             return
         model_name = self.model_selector.currentText()
-        registry = ToolRegistry(desktop_controller=self.windows_controller)
-        log_path = self.config.data_dir_path / "logs" / "action_log.jsonl"
-        def log_action(entry: dict) -> None:
-            record = {"timestamp": datetime.now(timezone.utc).isoformat(), **entry}
-            with log_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self.agent_loop = AgentLoop(registry=registry, model_adapter=OpenAICompatibleModelAdapter(registry, self.runtime, model_name), action_logger=log_action)
+        registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager)
+        self.agent_loop = AgentLoop(registry=registry, model_adapter=OpenAICompatibleModelAdapter(registry, self.runtime, model_name), action_logger=self._log_action, workflow_manager=self.workflow_manager)
         self.current_task = self.task_manager.create_task(f"Chat: {text[:32]}", project_path=self.config.data_dir, selected_model=model_name)
         self.task_manager.start(self.current_task.id)
         self.status_label.setText("Running")
@@ -289,9 +358,26 @@ class MainWindow(QMainWindow):
         else:
             self.task_manager.mark_failed(self.current_task.id, response)
         self.session_manager.save_message(self.active_conversation["id"], "assistant", response)
+        if result.get("success") and self.voice_output_enabled:
+            self._speak_response(response)
         self.status_label.setText("Stopped" if result.get("cancelled") else "Ready")
         self._refresh_history()
         self._populate_conversation_list()
+        if result.get("success") and self.workflow_manager.record_observation(result.get("tool_calls", [])):
+            suggestion = next(iter(self.workflow_manager.workflow_suggestions()), None)
+            if suggestion:
+                answer = QMessageBox.question(
+                    self, "Save a repeated workflow?",
+                    f"Jarvis noticed this successful action sequence has occurred more than once:\n\n"
+                    + "\n".join(f"{i}. {step['tool']} {json.dumps(step.get('arguments', {}), ensure_ascii=False)}" for i, step in enumerate(suggestion["steps"], 1))
+                    + f"\n\nSave it as a workflow? ({suggestion['occurrences']} times observed)",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    name, accepted = QInputDialog.getText(self, "Name workflow", "Workflow name:", text=suggestion["suggested_name"])
+                    if accepted and name.strip():
+                        self.workflow_manager.save_workflow(name, suggestion["steps"])
         candidates = self.pending_memory_candidates
         self.pending_memory_candidates = []
         for candidate in candidates:
@@ -310,6 +396,8 @@ class MainWindow(QMainWindow):
     def stop_current_task(self) -> None:
         if self.agent_loop is not None:
             self.agent_loop.cancel()
+        if self.workflow_worker is not None and self.workflow_worker.isRunning():
+            self.workflow_worker.cancel()
         self.task_manager.request_stop(self.current_task.id)
         self.status_label.setText("Stopped")
         self.task_manager.emergency_stop.stop()
@@ -325,20 +413,100 @@ class MainWindow(QMainWindow):
         window = MemoryView(self.memory_manager)
         window.exec()
 
+    def show_workflows(self) -> None:
+        window = WorkflowView(self.workflow_manager, self.run_saved_workflow)
+        window.exec()
+
+    def _log_action(self, entry: dict) -> None:
+        log_path = self.config.data_dir_path / "logs" / "action_log.jsonl"
+        record = {"timestamp": datetime.now(timezone.utc).isoformat(), **entry}
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def run_saved_workflow(self, workflow_id: str) -> dict:
+        workflow = self.workflow_manager.get_workflow(workflow_id)
+        if workflow is None:
+            return {"success": False, "error": "Saved workflow was not found."}
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return {"success": False, "error": "Wait for the current Jarvis request to finish before running a workflow."}
+        if self.workflow_worker is not None and self.workflow_worker.isRunning():
+            return {"success": False, "error": "A workflow is already running."}
+        replayable = {"open_application", "open_browser", "navigate_browser", "focus_window", "list_directory", "search_files", "create_directory"}
+        if any(not isinstance(step, dict) or step.get("tool") not in replayable for step in workflow["steps"]):
+            return {"success": False, "error": "This saved workflow contains legacy or unsupported steps. Remove it and save a new workflow from repeated actions."}
+        plan = "\n".join(f"{i}. {step.get('tool')}: {json.dumps(step.get('arguments', {}), ensure_ascii=False)}" for i, step in enumerate(workflow["steps"], 1) if isinstance(step, dict))
+        answer = QMessageBox.question(self, "Run workflow", f"Run '{workflow['name']}'? Risky steps will ask for separate approval.\n\n{plan}",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return {"success": False, "cancelled": True, "error": "Workflow run was cancelled."}
+        registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager)
+        self.workflow_worker = WorkflowWorker(self.workflow_manager, workflow_id, registry, PermissionPolicy())
+        self.workflow_worker.confirmation_requested.connect(self._confirm_tool_call)
+        self.workflow_worker.result_ready.connect(self._workflow_finished)
+        self.workflow_worker.start()
+        return {"success": True, "started": True}
+
+    def _workflow_finished(self, result: dict) -> None:
+        for step in result.get("steps", []):
+            self._log_action({"workflow": result.get("workflow"), **step})
+        if result.get("success"):
+            QMessageBox.information(self, "Workflow complete", f"Completed workflow: {result.get('workflow', '')}")
+        else:
+            QMessageBox.warning(self, "Workflow stopped", result.get("error", "Workflow did not complete."))
+
     def show_search(self) -> None:
-        query = self.prompt_input.text().strip() or "Jarvis desktop app"
-        results = self.search_manager.search(query)
-        if not results:
-            QMessageBox.information(self, "Search", "No local results found for this query.")
-            return
-        preview = results[0]["snippet"]
-        QMessageBox.information(self, "Search", f"Top result: {results[0]['title']}\n\n{preview}")
+        window = SearchView(self.search_manager, initial_query=self.prompt_input.text().strip())
+        window.exec()
 
     def show_voice_status(self) -> None:
-        status = "Voice input is available as a local interface stub."
-        if self.voice_manager.speech_to_text_available() or self.voice_manager.text_to_speech_available():
-            status = "Voice interfaces are enabled for local speech support."
-        QMessageBox.information(self, "Voice", status)
+        self.voice_manager.enable_speech()
+        if not self.voice_manager.speech_to_text_available():
+            QMessageBox.information(self, "Voice input unavailable", "Install the voice dependencies from requirements.txt and connect a microphone to enable speech input.")
+            return
+        if self.speech_input_worker is not None and self.speech_input_worker.isRunning():
+            return
+        answer = QMessageBox.question(
+            self, "Allow one-time voice transcription?",
+            "Jarvis will record one short microphone utterance and send the audio to Google's speech-recognition service for transcription. The transcript will appear in the input box for review; it will not be sent to Jarvis until you press Send. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_label.setText("Listening…")
+        self.speech_input_worker = SpeechInputWorker(self.voice_manager)
+        self.speech_input_worker.result_ready.connect(self._voice_transcribed)
+        self.speech_input_worker.start()
+
+    def _voice_transcribed(self, result: dict) -> None:
+        self.status_label.setText("Ready")
+        if result.get("success"):
+            self.prompt_input.setText(result["transcript"])
+            self.prompt_input.setFocus()
+        else:
+            QMessageBox.warning(self, "Voice transcription failed", result.get("error", "Unknown voice input error."))
+
+    def toggle_voice_output(self) -> None:
+        self.voice_manager.enable_speech()
+        if not self.voice_manager.text_to_speech_available():
+            QMessageBox.information(self, "Voice output unavailable", "Install pyttsx3 from requirements.txt to enable local Windows speech output.")
+            return
+        self.voice_output_enabled = not self.voice_output_enabled
+        self.settings_manager.set("voice_output", "true" if self.voice_output_enabled else "false")
+        self.voice_output_button.setText("🔊 Voice: On" if self.voice_output_enabled else "🔊 Voice: Off")
+
+    def _speak_response(self, text: str) -> None:
+        if self.speech_output_worker is not None and self.speech_output_worker.isRunning():
+            return
+        self.speech_output_worker = SpeechOutputWorker(self.voice_manager, text)
+        self.speech_output_worker.result_ready.connect(self._voice_output_finished)
+        self.speech_output_worker.start()
+
+    def _voice_output_finished(self, result: dict) -> None:
+        if not result.get("success"):
+            self.status_label.setText("Voice output failed")
+            QMessageBox.warning(self, "Voice output failed", result.get("error", "Unknown voice output error."))
 
     def apply_theme(self, theme: str) -> None:
         self.config.theme = theme

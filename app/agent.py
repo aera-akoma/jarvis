@@ -44,7 +44,7 @@ class OpenAICompatibleModelAdapter:
 class AgentLoop:
     """Model-driven tool loop for the Jarvis desktop agent."""
 
-    def __init__(self, registry: ToolRegistry | None = None, permission_policy: PermissionPolicy | None = None, model_adapter: Any | None = None, max_tool_iterations: int = 20, action_logger: Callable[[dict[str, Any]], None] | None = None) -> None:
+    def __init__(self, registry: ToolRegistry | None = None, permission_policy: PermissionPolicy | None = None, model_adapter: Any | None = None, max_tool_iterations: int = 20, action_logger: Callable[[dict[str, Any]], None] | None = None, workflow_manager: Any | None = None) -> None:
         self.registry = registry or ToolRegistry()
         self.permission_policy = permission_policy or PermissionPolicy()
         self.model_adapter = model_adapter
@@ -52,6 +52,7 @@ class AgentLoop:
         self.cancelled = False
         self.last_context: dict[str, Any] = {}
         self.action_logger = action_logger
+        self.workflow_manager = workflow_manager or getattr(self.registry, "workflow_manager", None)
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -134,6 +135,27 @@ class AgentLoop:
         result.setdefault("success", result.get("ok", False))
         return result
 
+    def _execute_workflow(self, arguments: dict[str, Any], *, confirm_tool=None) -> dict[str, Any]:
+        manager = self.workflow_manager
+        workflow_id = str(arguments.get("workflow_id", ""))
+        workflow = manager.get_workflow(workflow_id) if manager and workflow_id else None
+        if workflow is None:
+            return {"success": False, "error": "Saved workflow was not found."}
+        approved = bool(confirm_tool and confirm_tool("run_workflow", {"name": workflow["name"], "steps": workflow["steps"]}, "dangerous"))
+        if not self.permission_policy.allows("run_workflow", "dangerous", confirm=approved):
+            return {"success": False, "requires_confirmation": True, "error": "Workflow run was denied."}
+        result = manager.execute_workflow(
+            workflow_id, registry=self.registry, permission_policy=self.permission_policy,
+            confirm_step=confirm_tool, should_cancel=lambda: self.cancelled,
+        )
+        if self.action_logger:
+            for step in result.get("steps", []):
+                try:
+                    self.action_logger({"workflow": workflow["name"], **step})
+                except OSError as exc:
+                    step.setdefault("result", {})["action_log_error"] = str(exc)
+        return result
+
     def process_request(self, request: str, *, project_path: str | None = None, allow_confirmation: bool = False, confirm_tool: Callable[[str, dict[str, Any], str], bool] | None = None, conversation: list[dict[str, Any]] | None = None, memory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if self.cancelled:
             return {
@@ -173,7 +195,11 @@ class AgentLoop:
             if tool_call.get("tool"):
                 tool = tool_call["tool"]
                 args = tool_call.get("arguments", {}) or {}
-                result = self._execute_tool_call(tool, args, allow_confirmation=allow_confirmation, confirm_tool=confirm_tool)
+                if tool == "run_workflow":
+                    result = self._execute_workflow(args, confirm_tool=confirm_tool)
+                    result.setdefault("tool", tool)
+                else:
+                    result = self._execute_tool_call(tool, args, allow_confirmation=allow_confirmation, confirm_tool=confirm_tool)
                 tool_calls.append({"name": tool, "arguments": args, "result": result})
                 if self.action_logger:
                     try:
