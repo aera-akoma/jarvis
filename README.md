@@ -20,6 +20,7 @@ This repository is not a React/Electron web app. It is a Python desktop applicat
 - Local memory store with search
 - Workflow and settings persistence
 - Secure API key storage
+- Encrypted portable backups for conversations, memories, workflows, and selected settings
 - Windows startup integration scaffold
 - Standalone desktop packaging with PyInstaller
 - Installer scaffold for Windows deployment
@@ -74,6 +75,14 @@ A basic Windows installer setup is included under `installer/` and is intended t
 - API keys are stored in a secure OS credential flow rather than plaintext in app state.
 - Local data is handled with SQLite and stays on the machine.
 - The app is designed for local-first use instead of browser-only execution.
+
+## Encrypted backup and migration
+
+Open **Settings** and choose **Export encrypted backup…** to save a `.jarvisbackup` file. Create and confirm a passphrase of at least 12 characters; Jarvis cannot recover a lost passphrase. The backup contains conversations, messages, durable memories, saved workflows, and the selected safe settings. OS credentials and secret settings are excluded, so configure credentials again on a new PC.
+
+To move data, transfer the backup file to the other PC, open **Settings → Import / restore backup…**, enter the passphrase, and review the contents. **Merge** keeps existing data and adds the backup. **Replace personal data** deletes the existing conversations, messages, memories, and workflows after a separate confirmation; it preserves credentials and other settings.
+
+Jarvis redacts common credential patterns found in exported text, but pattern-based detection cannot identify every secret. Avoid putting passwords or tokens in conversations, memories, or workflows, and inspect sensitive content before sharing a backup. Project and workflow paths may refer to folders that do not exist on the destination PC.
 
 ## Current status
 

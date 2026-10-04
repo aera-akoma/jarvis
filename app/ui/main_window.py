@@ -404,10 +404,19 @@ class MainWindow(QMainWindow):
 
     def show_settings(self) -> None:
         window = SettingsWindow(self.config)
+        window.data_restored.connect(self._data_restored)
         window.exec()
         self.default_model_name = self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()
         self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
         self._populate_model_selector()
+
+    def _data_restored(self, result: dict) -> None:
+        conversations = self.session_manager.list_conversations()
+        if not any(item["id"] == self.active_conversation["id"] for item in conversations):
+            self.active_conversation = self.session_manager.create_conversation("New Chat", self.default_model_name)
+        self._populate_conversation_list()
+        self._refresh_history()
+        self.status_label.setText(f"Backup {result.get('strategy', 'restore')} complete")
 
     def show_memory(self) -> None:
         window = MemoryView(self.memory_manager)
