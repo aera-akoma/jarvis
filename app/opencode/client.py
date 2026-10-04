@@ -9,14 +9,22 @@ from urllib import error, request
 from urllib import request as request_module
 from urllib.parse import urlsplit
 
+from app.security.credentials import CredentialStore
+
 
 class OpenCodeClient:
     DEFAULT_MODEL = "OpenCode Zen"
 
-    def __init__(self, base_url: str | None = None) -> None:
+    def __init__(self, base_url: str | None = None, api_key: str | None = None) -> None:
         raw_base_url = base_url or os.getenv("JARVIS_OPENAI_BASE_URL") or os.getenv("OPENCODE_BASE_URL") or os.getenv("OPENAI_BASE_URL")
         self.base_url = raw_base_url.rstrip("/") if raw_base_url else None
-        self.api_key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY")
+        stored_key = None
+        if api_key is None and not (os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY")):
+            try:
+                stored_key = CredentialStore().get("OpenAI")
+            except OSError:
+                stored_key = None
+        self.api_key = api_key or os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY") or stored_key
         self.session_id: str | None = None
         self.last_error: str | None = None
         self._model_cache: list[str] = []
@@ -52,10 +60,14 @@ class OpenCodeClient:
         with self._connection_lock:
             self._active_connection = connection
         try:
+            if self._request_cancelled.is_set():
+                raise InterruptedError("Model request cancelled.")
             path = parts.path or "/"
             if parts.query:
                 path += "?" + parts.query
             connection.request("POST", path, body=json.dumps(payload).encode("utf-8"), headers=self.headers())
+            if self._request_cancelled.is_set():
+                raise InterruptedError("Model request cancelled.")
             response = connection.getresponse()
             body = response.read().decode("utf-8", errors="replace")
             if response.status >= 400:
@@ -147,10 +159,14 @@ class OpenCodeClient:
         """Call the configured chat-completions endpoint using its tool API."""
         self._request_cancelled.clear()
         if not self.base_url:
-            return {"final_response": "No model API endpoint is configured. Set JARVIS_OPENAI_BASE_URL to a provider endpoint that supports chat completions and tool calls."}
+            return {"error": "No model API endpoint is configured. Set JARVIS_OPENAI_BASE_URL to a provider endpoint that supports chat completions and tool calls."}
         api_tools = []
         for tool in tools:
-            properties = {key: {"type": "string", "description": description} for key, description in tool.get("parameters", {}).items()}
+            integer_parameters = {"x", "y", "width", "height", "clicks"}
+            properties = {
+                key: {"type": "integer" if key in integer_parameters else "string", "description": description}
+                for key, description in tool.get("parameters", {}).items()
+            }
             api_tools.append({"type": "function", "function": {
                 "name": tool["name"], "description": tool.get("description", ""),
                 "parameters": {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False},
@@ -183,7 +199,7 @@ class OpenCodeClient:
                 if self._request_cancelled.is_set():
                     break
         self.last_error = f"Tool-calling model request failed: {last_error}"
-        return {"final_response": self.last_error}
+        return {"error": self.last_error}
 
     def headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}

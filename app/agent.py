@@ -163,6 +163,8 @@ class AgentLoop:
             decision = self._model_decision(request_text, context=context)
             if self.cancelled:
                 return {"success": False, "cancelled": True, "summary": "The task was cancelled.", "tool_calls": tool_calls}
+            if isinstance(decision, dict) and decision.get("error"):
+                return {"success": False, "cancelled": False, "summary": str(decision["error"]), "tool_calls": tool_calls}
             if isinstance(decision, dict) and "tool" in decision and "arguments" in decision:
                 tool_call = decision
             else:

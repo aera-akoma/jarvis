@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
+from app.computer.desktop import WindowsDesktopController
 from app.permissions.policy import PermissionPolicy
 
 
-class WindowsController:
-    def __init__(self, permission_policy: PermissionPolicy | None = None) -> None:
+class WindowsController(WindowsDesktopController):
+    def __init__(self, permission_policy: PermissionPolicy | None = None, api: Any | None = None) -> None:
+        super().__init__(api=api)
         self.permission_policy = permission_policy or PermissionPolicy()
         self.action_log: list[str] = []
 

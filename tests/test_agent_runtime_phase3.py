@@ -127,6 +127,20 @@ def test_provider_client_closes_active_socket_on_stop():
     assert connection.close_called
 
 
+def test_model_client_loads_key_from_secure_credential_store(monkeypatch):
+    class StoredCredentials:
+        def get(self, name):
+            assert name == "OpenAI"
+            return "stored-provider-key"
+
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("JARVIS_OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("app.opencode.client.CredentialStore", StoredCredentials)
+    client = OpenCodeClient(base_url="https://provider.example/v1")
+    assert client.headers()["Authorization"] == "Bearer stored-provider-key"
+
+
 def test_stop_terminates_active_powershell_process():
     registry = ToolRegistry()
 
@@ -149,25 +163,41 @@ def test_stop_terminates_active_powershell_process():
     assert registry._cancel_requested.is_set()
 
 
-def test_pyside_chat_runs_agent_worker_and_persists_model_reply(tmp_path):
-    from PySide6.QtWidgets import QApplication
+def test_pyside_chat_runs_approved_tool_and_persists_model_reply(tmp_path, monkeypatch):
+    import json
+    import time
+    from PySide6.QtWidgets import QApplication, QMessageBox
     from app.ui.main_window import MainWindow
 
     application = QApplication.instance() or QApplication([])
     window = MainWindow(AppConfig(data_dir=str(tmp_path / "jarvis-data")))
     window.runtime.is_available = lambda: True
-    window.runtime.request_tool_decision = lambda **_kwargs: {"final_response": "The agent loop answered."}
+    target = tmp_path / "created-through-ui.txt"
+    model_replies = iter([
+        {"tool": "write_file", "arguments": {"path": str(target), "content": "from the UI tool flow"}},
+        {"final_response": "The file was written through the approved agent loop."},
+    ])
+    window.runtime.request_tool_decision = lambda **_kwargs: next(model_replies)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes)
     window.prompt_input.setText("Hi Jarvis")
 
     window.send_message()
     worker = window.agent_worker
-    assert worker is not None and worker.wait(3000)
+    assert worker is not None
+    deadline = time.monotonic() + 3
+    while worker.isRunning() and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
     application.processEvents()
+    assert not worker.isRunning()
 
     messages = window.session_manager.get_messages(window.active_conversation["id"])
     assert [message["role"] for message in messages] == ["user", "assistant"]
-    assert messages[-1]["content"] == "The agent loop answered."
+    assert messages[-1]["content"] == "The file was written through the approved agent loop."
+    assert target.read_text(encoding="utf-8") == "from the UI tool flow"
     assert window.task_manager.get_task(window.current_task.id).status == "completed"
+    action_log = tmp_path / "jarvis-data" / "logs" / "action_log.jsonl"
+    assert json.loads(action_log.read_text(encoding="utf-8").splitlines()[0])["tool"] == "write_file"
     window.close()
 
 

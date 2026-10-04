@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app.computer.windows import WindowsController
+
 
 @dataclass
 class ToolDefinition:
@@ -18,8 +20,9 @@ class ToolDefinition:
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(self, desktop_controller: WindowsController | None = None) -> None:
         self.tools: dict[str, ToolDefinition] = {}
+        self.desktop = desktop_controller or WindowsController()
         self._active_process: subprocess.Popen[str] | None = None
         self._process_lock = threading.Lock()
         self._cancel_requested = threading.Event()
@@ -31,85 +34,51 @@ class ToolRegistry:
             process = self._active_process
         if process is None or process.poll() is not None:
             return
-        process.terminate()
+        try:
+            process.terminate()
+        except OSError:
+            return
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            process.kill()
+            try:
+                process.kill()
+            except OSError:
+                pass
 
     def _register_default_tools(self) -> None:
-        self.register(
-            ToolDefinition(
-                name="read_file",
-                description="Read a text file from disk.",
-                permission_level="safe",
-                parameters={"path": "file path"},
-                handler=self._read_file,
-            )
-        )
-        self.register(
-            ToolDefinition(
-                name="write_file",
-                description="Write or overwrite a text file.",
-                permission_level="moderate",
-                parameters={"path": "file path", "content": "file contents"},
-                handler=self._write_file,
-            )
-        )
-        self.register(
-            ToolDefinition(
-                name="create_file",
-                description="Create a new file with content.",
-                permission_level="moderate",
-                parameters={"path": "file path", "content": "file contents"},
-                handler=self._create_file,
-            )
-        )
-        self.register(
-            ToolDefinition(
-                name="create_directory",
-                description="Create a directory tree.",
-                permission_level="moderate",
-                parameters={"path": "directory path"},
-                handler=self._create_directory,
-            )
-        )
-        self.register(
-            ToolDefinition(
-                name="list_directory",
-                description="List files in a directory.",
-                permission_level="safe",
-                parameters={"path": "directory path"},
-                handler=self._list_directory,
-            )
-        )
-        self.register(
-            ToolDefinition(
-                name="search_files",
-                description="Search for files under a directory.",
-                permission_level="safe",
-                parameters={"path": "directory path", "pattern": "file pattern"},
-                handler=self._search_files,
-            )
-        )
-        self.register(
-            ToolDefinition(
-                name="open_application",
-                description="Open an application or document on Windows.",
-                permission_level="safe",
-                parameters={"path": "application or document path"},
-                handler=self._open_application,
-            )
-        )
-        self.register(
-            ToolDefinition(
-                name="run_powershell",
-                description="Run a PowerShell command.",
-                permission_level="dangerous",
-                parameters={"command": "PowerShell command"},
-                handler=self._run_powershell,
-            )
-        )
+        definitions = [
+            ToolDefinition("read_file", "Read a text file from disk.", "safe", {"path": "file path"}, self._read_file),
+            ToolDefinition("write_file", "Write or overwrite a text file.", "moderate", {"path": "file path", "content": "file contents"}, self._write_file),
+            ToolDefinition("create_file", "Create a new file with content.", "moderate", {"path": "file path", "content": "file contents"}, self._create_file),
+            ToolDefinition("create_directory", "Create a directory tree.", "moderate", {"path": "directory path"}, self._create_directory),
+            ToolDefinition("list_directory", "List files in a directory.", "safe", {"path": "directory path"}, self._list_directory),
+            ToolDefinition("search_files", "Search for files under a directory.", "safe", {"path": "directory path", "pattern": "file pattern"}, self._search_files),
+            ToolDefinition("open_application", "Open an application or document on Windows.", "safe", {"path": "application or document path"}, self._open_application),
+            ToolDefinition("run_powershell", "Run a PowerShell command.", "dangerous", {"command": "PowerShell command"}, self._run_powershell),
+        ]
+        for definition in definitions:
+            self.register(definition)
+        self._register_desktop_tools()
+
+    def _register_desktop_tools(self) -> None:
+        definitions = [
+            ("take_screenshot", "Capture the desktop as a PNG at the requested path.", "moderate", {"path": "PNG output file path"}, self.desktop.take_screenshot),
+            ("move_mouse", "Move the mouse pointer to screen coordinates.", "moderate", {"x": "horizontal screen coordinate", "y": "vertical screen coordinate"}, self.desktop.move_mouse),
+            ("click", "Click a screen coordinate with the left, right, or middle mouse button.", "moderate", {"x": "horizontal screen coordinate", "y": "vertical screen coordinate", "button": "left, right, or middle"}, self.desktop.click),
+            ("double_click", "Double click a screen coordinate.", "moderate", {"x": "horizontal screen coordinate", "y": "vertical screen coordinate"}, self.desktop.double_click),
+            ("right_click", "Right click a screen coordinate.", "moderate", {"x": "horizontal screen coordinate", "y": "vertical screen coordinate"}, self.desktop.right_click),
+            ("type_text", "Type text into the currently focused application.", "moderate", {"text": "text to type"}, self.desktop.type_text),
+            ("press_key", "Press one named keyboard key.", "moderate", {"key": "key name such as Enter or Escape"}, self.desktop.press_key),
+            ("hotkey", "Press a key combination, for example Ctrl+Shift+S.", "dangerous", {"keys": "keys joined with +"}, self.desktop.hotkey),
+            ("get_windows", "List visible desktop windows and their bounds.", "safe", {}, self.desktop.get_windows),
+            ("focus_window", "Bring the uniquely matching visible window to the foreground.", "safe", {"title": "visible window title or unique substring"}, self.desktop.focus_window),
+            ("move_window", "Move a visible window while preserving its size.", "moderate", {"title": "visible window title", "x": "new horizontal coordinate", "y": "new vertical coordinate"}, self.desktop.move_window),
+            ("resize_window", "Resize a visible window while preserving its position.", "moderate", {"title": "visible window title", "width": "new width in pixels", "height": "new height in pixels"}, self.desktop.resize_window),
+            ("close_application", "Request that a visible application window close.", "dangerous", {"title": "visible window title"}, self.desktop.close_application),
+        ]
+        for name, description, permission, parameters, handler in definitions:
+            self.register(ToolDefinition(name, description, permission, parameters, handler))
 
     def register(self, tool: ToolDefinition) -> None:
         self.tools[tool.name] = tool
@@ -144,7 +113,10 @@ class ToolRegistry:
             payload["path"] = target
         if tool.handler is None:
             return {"ok": False, "success": False, "error": f"Tool {name} has no handler"}
-        result = tool.handler(**payload)
+        try:
+            result = tool.handler(**payload)
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            return {"ok": False, "success": False, "tool": name, "error": str(exc)}
         if isinstance(result, dict):
             result.setdefault("success", result.get("ok", False))
             result.setdefault("ok", result.get("success", False))

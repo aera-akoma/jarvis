@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from app.config import AppConfig
 from app.agent import AgentLoop, OpenAICompatibleModelAdapter
+from app.core.settings_manager import SettingsManager
 from app.core.session_manager import SessionManager
 from app.memory.memory_manager import MemoryManager
 from app.opencode.client import OpenCodeClient
@@ -68,15 +69,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config or AppConfig()
         self.session_manager = SessionManager(self.config)
+        self.settings_manager = SettingsManager(self.config)
+        self.default_model_name = self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()
         self.memory_manager = MemoryManager(self.config.database_path)
         self.search_manager = SearchManager()
         self.voice_manager = VoiceManager()
-        self.runtime = OpenCodeClient()
+        self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
         self.agent_loop: AgentLoop | None = None
         self.agent_worker: AgentWorker | None = None
         self.task_manager = TaskManager()
         self.current_task = self.task_manager.create_task("Current session", project_path=self.config.data_dir)
-        self.active_conversation = self.session_manager.create_conversation("New Chat", self.config.default_model())
+        self.active_conversation = self.session_manager.create_conversation("New Chat", self.default_model_name)
         self.setWindowTitle(self.config.app_name)
         self.resize(1200, 800)
         self._build_ui()
@@ -92,8 +95,8 @@ class MainWindow(QMainWindow):
             return
 
         self.model_selector.addItems(models)
-        if self.config.default_model() in models:
-            self.model_selector.setCurrentText(self.config.default_model())
+        if self.default_model_name in models:
+            self.model_selector.setCurrentText(self.default_model_name)
         else:
             self.model_selector.setCurrentIndex(0)
 
@@ -208,7 +211,7 @@ class MainWindow(QMainWindow):
     def new_chat(self) -> None:
         if self.agent_worker is not None and self.agent_worker.isRunning():
             return
-        self.active_conversation = self.session_manager.create_conversation("New Chat", self.model_selector.currentText() if hasattr(self, "model_selector") else self.config.default_model())
+        self.active_conversation = self.session_manager.create_conversation("New Chat", self.model_selector.currentText() if hasattr(self, "model_selector") else self.default_model_name)
         self.prompt_input.clear()
         self._refresh_history()
         self._populate_conversation_list()
@@ -288,6 +291,9 @@ class MainWindow(QMainWindow):
     def show_settings(self) -> None:
         window = SettingsWindow(self.config)
         window.exec()
+        self.default_model_name = self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()
+        self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
+        self._populate_model_selector()
 
     def show_memory(self) -> None:
         window = MemoryView(self.memory_manager)
