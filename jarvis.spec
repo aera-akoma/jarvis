@@ -7,6 +7,10 @@ hidden_imports = [
     "PySide6.QtGui",
     "PySide6.QtWidgets",
     "PySide6.QtNetwork",
+    "cryptography",
+    "cryptography.hazmat.bindings._rust",
+    "cryptography.hazmat.primitives.ciphers.aead",
+    "cryptography.hazmat.primitives.kdf.scrypt",
     # These features are imported lazily and selected at runtime.
     "speech_recognition",
     "pyaudio",

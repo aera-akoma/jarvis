@@ -68,9 +68,9 @@ The output is generated under `dist/Jarvis/` as `Jarvis.exe` plus its required b
 
 ## Windows installer
 
-After building `dist/Jarvis/`, install the Nullsoft Scriptable Install System (NSIS) and run `makensis installer/installer.nsi` from the repository root. This creates `dist/Jarvis-Setup.exe`. The installer registers an uninstall entry and Start Menu shortcuts. Uninstall removes application files and startup integration but keeps the user's database, logs, attachments, credentials, and backups in their profile.
+After building `dist/Jarvis/`, install the Nullsoft Scriptable Install System (NSIS) and run `cd installer; makensis installer.nsi` from the repository root. This creates `dist/Jarvis-Setup.exe`. The installer is a user-scoped install and does not require elevation; it installs into `%LOCALAPPDATA%\Programs\Jarvis` and registers its uninstall entry under the current user.
 
-Updates are currently manual: build and install the newer release to the same location. Jarvis user data is stored separately under `%APPDATA%\Jarvis` and is preserved. Automatic update delivery is not implemented.
+Uninstall removes application files and startup integration but keeps the user's database, logs, attachments, credentials, and backups in their profile under `%APPDATA%\Jarvis`. Updates are currently manual: build and install the newer release to the same location. Automatic update delivery is not implemented.
 
 The standalone executable bundles Python dependencies, not a browser installation. Browser actions require Edge or Chrome installed on the machine; Playwright Chromium is an optional separate install. Voice input also depends on a working microphone and audio backend.
 

@@ -1,18 +1,19 @@
 !include "MUI2.nsh"
-!cd "${__FILEDIR__}"
 
 !define APP_NAME "Jarvis"
 !define APP_VERSION "0.1.0"
 !define APP_PUBLISHER "Jarvis"
 !define APP_EXE "Jarvis.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Jarvis"
+!define DIST_ROOT "..\dist"
+!define APP_DIST "${DIST_ROOT}\Jarvis"
 
 Name "${APP_NAME} ${APP_VERSION}"
 Caption "${APP_NAME} Setup"
-OutFile "..\dist\Jarvis-Setup.exe"
-InstallDir "$PROGRAMFILES64\Jarvis"
-InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
-RequestExecutionLevel admin
+OutFile "${DIST_ROOT}\Jarvis-Setup.exe"
+InstallDir "$LOCALAPPDATA\Programs\Jarvis"
+InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
+RequestExecutionLevel user
 Unicode True
 SetCompressor /SOLID lzma
 SetCompressorDictSize 32
@@ -25,9 +26,8 @@ SetCompressorDictSize 32
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install Jarvis" SEC_MAIN
-    SectionIn RO
     SetOutPath "$INSTDIR"
-    File /r "..\dist\Jarvis\*"
+    File /r "${APP_DIST}\*"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
     CreateDirectory "$SMPROGRAMS\Jarvis"
@@ -35,14 +35,14 @@ Section "Install Jarvis" SEC_MAIN
     CreateShortcut "$SMPROGRAMS\Jarvis\Uninstall Jarvis.lnk" "$INSTDIR\Uninstall.exe"
     CreateShortcut "$DESKTOP\Jarvis.lnk" "$INSTDIR\${APP_EXE}"
 
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "Publisher" "${APP_PUBLISHER}"
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
-    WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoModify" 1
-    WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoRepair" 1
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "${APP_PUBLISHER}"
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
+    WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
+    WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"
@@ -51,7 +51,7 @@ Section "Uninstall"
     Delete "$DESKTOP\Jarvis.lnk"
     RMDir "$SMPROGRAMS\Jarvis"
     Delete "$APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Jarvis-startup.cmd"
-    DeleteRegKey HKLM "${UNINSTALL_KEY}"
+    DeleteRegKey HKCU "${UNINSTALL_KEY}"
     RMDir /r "$INSTDIR"
     MessageBox MB_OK "Jarvis has been removed. Personal data and backups under your user profile were kept."
 SectionEnd
