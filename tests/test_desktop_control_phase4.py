@@ -1,8 +1,10 @@
 from app.agent import AgentLoop
 from app.computer.windows import WindowsController
+from app.computer.browser import BrowserController
 from app.opencode.client import OpenCodeClient
 from app.permissions.policy import PermissionPolicy
 from app.tooling import ToolRegistry
+from pathlib import Path
 
 
 class FakeDesktopAPI:
@@ -118,3 +120,137 @@ def test_model_schema_exposes_desktop_coordinates_as_integers(monkeypatch):
     click = next(item["function"] for item in captured["tools"] if item["function"]["name"] == "click")
     assert click["parameters"]["properties"]["x"]["type"] == "integer"
     assert click["parameters"]["properties"]["y"]["type"] == "integer"
+
+
+def test_browser_session_navigates_reads_interacts_and_closes(tmp_path):
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        def count(self):
+            return 1
+
+        def click(self, **_kwargs):
+            self.page.actions.append(("click", self.selector))
+
+        def fill(self, text, **_kwargs):
+            self.page.actions.append(("fill", self.selector, text))
+
+        def inner_text(self, **_kwargs):
+            return "Example page body"
+
+    class Page:
+        def __init__(self):
+            self.url = ""
+            self.actions = []
+
+        def set_default_timeout(self, _timeout):
+            pass
+
+        def goto(self, url, **_kwargs):
+            self.url = url
+            return type("Response", (), {"status": 200})()
+
+        def title(self):
+            return "Example"
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        def screenshot(self, path, **_kwargs):
+            from pathlib import Path
+            Path(path).write_bytes(b"fake png")
+
+    class Browser:
+        def __init__(self):
+            self.page = Page()
+            self.closed = False
+
+        def new_page(self):
+            return self.page
+
+        def close(self):
+            self.closed = True
+
+    class Playwright:
+        def __init__(self):
+            self.chromium = self
+            self.browser = Browser()
+            self.launches = []
+
+        def start(self):
+            return self
+
+        def launch(self, **options):
+            self.launches.append(options)
+            return self.browser
+
+        def stop(self):
+            pass
+
+    playwright = Playwright()
+    controller = BrowserController(playwright_factory=lambda: playwright)
+    opened = controller.open_browser("https://example.com")
+    navigated = controller.navigate_browser("https://example.org")
+    clicked = controller.click_browser_element("button.submit")
+    typed = controller.type_browser("input[name=q]", "Jarvis")
+    page = controller.read_page()
+    screenshot_path = tmp_path / "browser-test.png"
+    screenshot = controller.take_browser_screenshot(str(screenshot_path))
+    closed = controller.close_browser()
+
+    assert opened["success"] and opened["status"] == 200
+    assert navigated["url"] == "https://example.org"
+    assert clicked["success"] and typed["characters_typed"] == 6
+    assert page["text"] == "Example page body"
+    assert screenshot["image_path"].endswith("browser-test.png")
+    assert closed["closed"] is True and playwright.browser.closed is True
+    assert screenshot_path.exists()
+
+
+def test_browser_rejects_non_web_urls_before_launching():
+    class NeverStarted:
+        def __call__(self):
+            raise AssertionError("Invalid URL must not launch a browser.")
+
+    result = BrowserController(playwright_factory=NeverStarted()).open_browser("file:///C:/secrets.txt")
+    assert result["success"] is False
+    assert "http:// or https://" in result["error"]
+
+
+def test_desktop_screenshot_is_attached_for_vision_model_analysis(tmp_path, monkeypatch):
+    import json
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+    from app.agent import OpenAICompatibleModelAdapter
+
+    screenshot_path = tmp_path / "screen.png"
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.blue)
+    assert image.save(str(screenshot_path), "PNG")
+
+    api = FakeDesktopAPI()
+    api.take_screenshot = lambda _path: {"path": str(screenshot_path), "image_path": str(screenshot_path), "format": "png"}
+    registry = ToolRegistry(desktop_controller=WindowsController(api=api))
+    client = OpenCodeClient(base_url="https://provider.example/v1")
+    payloads = []
+
+    def fake_post(_endpoint, payload):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"choices": [{"message": {"tool_calls": [{"function": {
+                "name": "take_screenshot", "arguments": json.dumps({"path": str(screenshot_path)}),
+            }}]}}]}
+        vision_message = payload["messages"][-1]
+        assert vision_message["role"] == "user"
+        assert vision_message["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        return {"choices": [{"message": {"content": "The screen is mostly blue."}}]}
+
+    monkeypatch.setattr(client, "_post_json", fake_post)
+    agent = AgentLoop(registry=registry, model_adapter=OpenAICompatibleModelAdapter(registry, client, "vision-model"))
+    result = agent.process_request("Describe my screen", confirm_tool=lambda *_args: True)
+
+    assert result["success"] is True
+    assert result["summary"] == "The screen is mostly blue."
+    assert len(payloads) == 2

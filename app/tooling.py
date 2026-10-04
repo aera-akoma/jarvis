@@ -63,7 +63,7 @@ class ToolRegistry:
 
     def _register_desktop_tools(self) -> None:
         definitions = [
-            ("take_screenshot", "Capture the desktop as a PNG at the requested path.", "moderate", {"path": "PNG output file path"}, self.desktop.take_screenshot),
+            ("take_screenshot", "Capture the desktop as a PNG and send the image to the configured model for analysis.", "moderate", {"path": "PNG output file path"}, self.desktop.take_screenshot),
             ("move_mouse", "Move the mouse pointer to screen coordinates.", "moderate", {"x": "horizontal screen coordinate", "y": "vertical screen coordinate"}, self.desktop.move_mouse),
             ("click", "Click a screen coordinate with the left, right, or middle mouse button.", "moderate", {"x": "horizontal screen coordinate", "y": "vertical screen coordinate", "button": "left, right, or middle"}, self.desktop.click),
             ("double_click", "Double click a screen coordinate.", "moderate", {"x": "horizontal screen coordinate", "y": "vertical screen coordinate"}, self.desktop.double_click),
@@ -76,6 +76,13 @@ class ToolRegistry:
             ("move_window", "Move a visible window while preserving its size.", "moderate", {"title": "visible window title", "x": "new horizontal coordinate", "y": "new vertical coordinate"}, self.desktop.move_window),
             ("resize_window", "Resize a visible window while preserving its position.", "moderate", {"title": "visible window title", "width": "new width in pixels", "height": "new height in pixels"}, self.desktop.resize_window),
             ("close_application", "Request that a visible application window close.", "dangerous", {"title": "visible window title"}, self.desktop.close_application),
+            ("open_browser", "Open a visible Jarvis-managed browser at an HTTP(S) URL.", "moderate", {"url": "HTTP or HTTPS URL to open"}, self.desktop.open_browser),
+            ("navigate_browser", "Navigate the active Jarvis browser tab to an HTTP(S) URL.", "moderate", {"url": "HTTP or HTTPS URL to open"}, self.desktop.navigate_browser),
+            ("click_browser_element", "Click one uniquely matched CSS selector in the active page.", "dangerous", {"selector": "CSS selector matching exactly one element"}, self.desktop.click_browser_element),
+            ("type_browser", "Fill one uniquely matched form field in the active page.", "dangerous", {"selector": "CSS selector for the field", "text": "text to enter"}, self.desktop.type_browser),
+            ("read_page", "Read the active page text; the text is sent to the configured model for assistance.", "dangerous", {}, self.desktop.read_page),
+            ("take_browser_screenshot", "Capture the active page; its image is sent to the configured model for analysis.", "moderate", {"path": "PNG output file path"}, self.desktop.take_browser_screenshot),
+            ("close_browser", "Close Jarvis's managed browser window and its tabs.", "dangerous", {}, self.desktop.close_browser),
         ]
         for name, description, permission, parameters, handler in definitions:
             self.register(ToolDefinition(name, description, permission, parameters, handler))

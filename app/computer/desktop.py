@@ -276,7 +276,8 @@ class WindowsDesktopController:
         self.api = api or WindowsDesktopAPI()
 
     def take_screenshot(self, path: str) -> dict[str, Any]:
-        return {"success": True, **self.api.take_screenshot(path)}
+        result = self.api.take_screenshot(path)
+        return {"success": True, **result, "image_path": result.get("path", path)}
 
     def move_mouse(self, x: int, y: int) -> dict[str, Any]:
         return {"success": True, **self.api.move_mouse(x, y)}

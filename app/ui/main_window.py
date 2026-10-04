@@ -24,12 +24,15 @@ from PySide6.QtWidgets import (
 
 from app.config import AppConfig
 from app.agent import AgentLoop, OpenAICompatibleModelAdapter
+from app.computer.windows import WindowsController
 from app.core.settings_manager import SettingsManager
 from app.core.session_manager import SessionManager
 from app.memory.memory_manager import MemoryManager
+from app.memory.memory_manager import MemoryCandidateExtractor
 from app.opencode.client import OpenCodeClient
 from app.search.search_manager import SearchManager
 from app.tasks import TaskManager
+from app.tooling import ToolRegistry
 from app.ui.memory_view import MemoryView
 from app.ui.settings_window import SettingsWindow
 from app.voice.voice_manager import VoiceManager
@@ -39,12 +42,13 @@ class AgentWorker(QThread):
     result_ready = Signal(object)
     confirmation_requested = Signal(object)
 
-    def __init__(self, agent: AgentLoop, request: str, project_path: str, conversation: list[dict]) -> None:
+    def __init__(self, agent: AgentLoop, request: str, project_path: str, conversation: list[dict], memory: list[dict]) -> None:
         super().__init__()
         self.agent = agent
         self.request = request
         self.project_path = project_path
         self.conversation = conversation
+        self.memory = memory
 
     def _confirm(self, tool: str, arguments: dict, level: str) -> bool:
         response = {"tool": tool, "arguments": arguments, "level": level, "event": threading.Event(), "approved": False}
@@ -55,7 +59,7 @@ class AgentWorker(QThread):
     def run(self) -> None:
         try:
             result = self.agent.process_request(self.request, project_path=self.project_path,
-                                                conversation=self.conversation, confirm_tool=self._confirm)
+                                                conversation=self.conversation, memory=self.memory, confirm_tool=self._confirm)
         except Exception as exc:
             result = {"success": False, "cancelled": self.agent.cancelled,
                       "summary": f"Agent request failed: {exc}", "tool_calls": []}
@@ -72,9 +76,12 @@ class MainWindow(QMainWindow):
         self.settings_manager = SettingsManager(self.config)
         self.default_model_name = self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()
         self.memory_manager = MemoryManager(self.config.database_path)
+        self.memory_candidate_extractor = MemoryCandidateExtractor()
+        self.pending_memory_candidates: list[dict] = []
         self.search_manager = SearchManager()
         self.voice_manager = VoiceManager()
         self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
+        self.windows_controller = WindowsController()
         self.agent_loop: AgentLoop | None = None
         self.agent_worker: AgentWorker | None = None
         self.task_manager = TaskManager()
@@ -243,7 +250,7 @@ class MainWindow(QMainWindow):
         if self.agent_worker is not None and self.agent_worker.isRunning():
             return
         model_name = self.model_selector.currentText()
-        registry = __import__("app.tooling", fromlist=["ToolRegistry"]).ToolRegistry()
+        registry = ToolRegistry(desktop_controller=self.windows_controller)
         log_path = self.config.data_dir_path / "logs" / "action_log.jsonl"
         def log_action(entry: dict) -> None:
             record = {"timestamp": datetime.now(timezone.utc).isoformat(), **entry}
@@ -255,16 +262,21 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Running")
 
         self.session_manager.save_message(self.active_conversation["id"], "user", text)
+        self.pending_memory_candidates = self.memory_candidate_extractor.extract_many(text)
         self.prompt_input.clear()
         history = self.session_manager.get_messages(self.active_conversation["id"])
-        self.agent_worker = AgentWorker(self.agent_loop, text, self.config.data_dir, history[:-1])
+        memory_query = " ".join([text, *(message.get("content", "") for message in history[-7:])])
+        memories = self.memory_manager.retrieve_relevant(memory_query)
+        self.agent_worker = AgentWorker(self.agent_loop, text, self.config.data_dir, history[:-1], memories)
         self.agent_worker.confirmation_requested.connect(self._confirm_tool_call)
         self.agent_worker.result_ready.connect(self._agent_finished)
         self.agent_worker.start()
 
     def _confirm_tool_call(self, request: dict) -> None:
         details = json.dumps(request["arguments"], ensure_ascii=False, indent=2)
-        answer = QMessageBox.question(self, "Jarvis permission", f"Allow {request['level']} action: {request['tool']}?\n\n{details}", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        tool_definition = self.agent_loop.registry.get(request["tool"]) if self.agent_loop else None
+        description = f"{tool_definition.description}\n\n" if tool_definition else ""
+        answer = QMessageBox.question(self, "Jarvis permission", f"{description}Allow {request['level']} action: {request['tool']}?\n\n{details}", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         request["approved"] = answer == QMessageBox.StandardButton.Yes
         request["event"].set()
 
@@ -280,6 +292,20 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Stopped" if result.get("cancelled") else "Ready")
         self._refresh_history()
         self._populate_conversation_list()
+        candidates = self.pending_memory_candidates
+        self.pending_memory_candidates = []
+        for candidate in candidates:
+            answer = QMessageBox.question(
+                self, "Save a Jarvis memory?",
+                f"Would you like Jarvis to remember this?\n\n[{candidate['category']}] {candidate['content']}\n\nYou can review or delete it later in Memory.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                try:
+                    self.memory_manager.add_memory(**candidate)
+                except ValueError as exc:
+                    QMessageBox.warning(self, "Memory not saved", str(exc))
 
     def stop_current_task(self) -> None:
         if self.agent_loop is not None:
