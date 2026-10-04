@@ -1,4 +1,5 @@
 !include "MUI2.nsh"
+!cd "${__FILEDIR__}"
 
 !define APP_NAME "Jarvis"
 !define APP_VERSION "0.1.0"
@@ -26,12 +27,13 @@ SetCompressorDictSize 32
 Section "Install Jarvis" SEC_MAIN
     SectionIn RO
     SetOutPath "$INSTDIR"
-    File "..\dist\Jarvis.exe"
+    File /r "..\dist\Jarvis\*"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
     CreateDirectory "$SMPROGRAMS\Jarvis"
     CreateShortcut "$SMPROGRAMS\Jarvis\Jarvis.lnk" "$INSTDIR\${APP_EXE}"
     CreateShortcut "$SMPROGRAMS\Jarvis\Uninstall Jarvis.lnk" "$INSTDIR\Uninstall.exe"
+    CreateShortcut "$DESKTOP\Jarvis.lnk" "$INSTDIR\${APP_EXE}"
 
     WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
@@ -46,6 +48,7 @@ SectionEnd
 Section "Uninstall"
     Delete "$SMPROGRAMS\Jarvis\Jarvis.lnk"
     Delete "$SMPROGRAMS\Jarvis\Uninstall Jarvis.lnk"
+    Delete "$DESKTOP\Jarvis.lnk"
     RMDir "$SMPROGRAMS\Jarvis"
     Delete "$APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Jarvis-startup.cmd"
     DeleteRegKey HKLM "${UNINSTALL_KEY}"

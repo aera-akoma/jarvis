@@ -29,7 +29,10 @@ def install_exception_logging(log_path: Path, notify: Callable[[str], None] | No
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
-        frames = "".join(traceback.format_tb(exc_traceback))
+        frames = "\n".join(
+            f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+            for frame in traceback.extract_tb(exc_traceback)
+        )
         logger.critical("Uncaught application exception (%s)\n%s", exc_type.__name__, frames)
         if notify:
             notify(f"Jarvis encountered an unexpected error. Details were saved to:\n{log_path}")

@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from app.config import AppConfig
 from app.core.settings_manager import SettingsManager
 from app.security.credentials import CredentialStore
@@ -13,6 +17,7 @@ def test_settings_manager_round_trip(tmp_path):
     assert settings.get("default_model") == "Claude Sonnet"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Credential round trip requires Windows DPAPI")
 def test_credential_store_round_trip(tmp_path):
     store = CredentialStore(path=str(tmp_path / "credentials.json"))
     store.set("OpenAI", "demo-key")
@@ -22,6 +27,7 @@ def test_credential_store_round_trip(tmp_path):
     assert store.get("OpenAI") is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Credential protection requires Windows DPAPI")
 def test_credential_store_persists_only_protected_ciphertext(tmp_path):
     import json
 
@@ -37,8 +43,6 @@ def test_credential_store_persists_only_protected_ciphertext(tmp_path):
 
 
 def test_credential_store_refuses_legacy_plaintext_without_overwriting(tmp_path):
-    import pytest
-
     path = tmp_path / "credentials.json"
     original = '{"OpenAI": "plaintext-must-not-be-read"}'
     path.write_text(original, encoding="utf-8")
