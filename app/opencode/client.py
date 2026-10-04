@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
+import threading
 import uuid
 from urllib import error, request
+from urllib import request as request_module
+from urllib.parse import urlsplit
 
 
 class OpenCodeClient:
@@ -16,6 +20,55 @@ class OpenCodeClient:
         self.session_id: str | None = None
         self.last_error: str | None = None
         self._model_cache: list[str] = []
+        self._active_connection: http.client.HTTPConnection | None = None
+        self._connection_lock = threading.Lock()
+        self._request_cancelled = threading.Event()
+
+    def cancel_current_request(self) -> None:
+        """Close the active HTTP socket so STOP interrupts a pending response."""
+        self._request_cancelled.set()
+        with self._connection_lock:
+            connection = self._active_connection
+        if connection is None:
+            return
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(2)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        connection.close()
+
+    def _post_json(self, endpoint: str, payload: dict) -> dict:
+        parts = urlsplit(endpoint)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            raise ValueError("The configured model endpoint must be an HTTP(S) URL.")
+        connection_type = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        connection = connection_type(parts.hostname, parts.port, timeout=30)
+        with self._connection_lock:
+            self._active_connection = connection
+        try:
+            path = parts.path or "/"
+            if parts.query:
+                path += "?" + parts.query
+            connection.request("POST", path, body=json.dumps(payload).encode("utf-8"), headers=self.headers())
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+            if response.status >= 400:
+                raise ValueError(f"HTTP {response.status}: {body[:500]}")
+            result = json.loads(body)
+            if not isinstance(result, dict):
+                raise ValueError("The model endpoint returned a non-object JSON response.")
+            return result
+        finally:
+            with self._connection_lock:
+                if self._active_connection is connection:
+                    self._active_connection = None
+            connection.close()
 
     def create_session(self) -> str:
         self.session_id = uuid.uuid4().hex
@@ -58,9 +111,9 @@ class OpenCodeClient:
         for root in self._runtime_urls():
             for suffix in ("", "/models", "/v1/models", "/api/models", "/openai/v1/models", "/inference/openai/v1/models"):
                 endpoint = root.rstrip("/") + suffix
-                req = request.Request(endpoint, headers=self.headers(), method="GET")
+                req = request_module.Request(endpoint, headers=self.headers(), method="GET")
                 try:
-                    with request.urlopen(req, timeout=10) as response:
+                    with request_module.urlopen(req, timeout=10) as response:
                         body = response.read().decode("utf-8", errors="replace")
                         payload = json.loads(body)
                         models = self._coerce_models(payload)
@@ -89,6 +142,48 @@ class OpenCodeClient:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
         }
+
+    def request_tool_decision(self, *, request: str, model_name: str, tools: list[dict], messages: list[dict], system_prompt: str) -> dict:
+        """Call the configured chat-completions endpoint using its tool API."""
+        self._request_cancelled.clear()
+        if not self.base_url:
+            return {"final_response": "No model API endpoint is configured. Set JARVIS_OPENAI_BASE_URL to a provider endpoint that supports chat completions and tool calls."}
+        api_tools = []
+        for tool in tools:
+            properties = {key: {"type": "string", "description": description} for key, description in tool.get("parameters", {}).items()}
+            api_tools.append({"type": "function", "function": {
+                "name": tool["name"], "description": tool.get("description", ""),
+                "parameters": {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False},
+            }})
+        prior = []
+        tool_call_index = 0
+        for message in messages:
+            if message.get("role") == "assistant":
+                call = message["tool_call"]
+                tool_call_id = f"jarvis-tool-{tool_call_index}"
+                tool_call_index += 1
+                prior.append({"role": "assistant", "tool_calls": [{"id": tool_call_id, "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call["arguments"])} }]})
+            elif message.get("role") == "tool":
+                prior.append({"role": "tool", "tool_call_id": f"jarvis-tool-{tool_call_index - 1}", "content": message["content"]})
+        payload = {"model": model_name, "temperature": 0.2,
+                   "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": request}, *prior],
+                   "tools": api_tools, "tool_choice": "auto"}
+        last_error = None
+        for endpoint in (f"{self.base_url}/chat/completions", f"{self.base_url}/v1/chat/completions", f"{self.base_url}/openai/v1/chat/completions"):
+            try:
+                body = self._post_json(endpoint, payload)
+                message = body["choices"][0]["message"]
+                calls = message.get("tool_calls") or []
+                if calls:
+                    function = calls[0].get("function", {})
+                    return {"tool": function.get("name"), "arguments": json.loads(function.get("arguments") or "{}")}
+                return {"final_response": str(message.get("content") or "The model returned an empty response.")}
+            except (error.HTTPError, error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+                last_error = exc
+                if self._request_cancelled.is_set():
+                    break
+        self.last_error = f"Tool-calling model request failed: {last_error}"
+        return {"final_response": self.last_error}
 
     def headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -132,9 +227,9 @@ class OpenCodeClient:
 
         for endpoint in candidate_endpoints:
             data = json.dumps(payload).encode("utf-8")
-            req = request.Request(endpoint, data=data, headers=self.headers(), method="POST")
+            req = request_module.Request(endpoint, data=data, headers=self.headers(), method="POST")
             try:
-                with request.urlopen(req, timeout=15) as response:
+                with request_module.urlopen(req, timeout=15) as response:
                     body = response.read().decode("utf-8", errors="replace")
                     result = json.loads(body)
                     if "choices" in result and result["choices"]:

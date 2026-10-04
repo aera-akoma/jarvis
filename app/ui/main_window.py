@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from typing import Optional
+import json
+import threading
+from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -20,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import AppConfig
+from app.agent import AgentLoop, OpenAICompatibleModelAdapter
 from app.core.session_manager import SessionManager
 from app.memory.memory_manager import MemoryManager
 from app.opencode.client import OpenCodeClient
@@ -28,6 +32,33 @@ from app.tasks import TaskManager
 from app.ui.memory_view import MemoryView
 from app.ui.settings_window import SettingsWindow
 from app.voice.voice_manager import VoiceManager
+
+
+class AgentWorker(QThread):
+    result_ready = Signal(object)
+    confirmation_requested = Signal(object)
+
+    def __init__(self, agent: AgentLoop, request: str, project_path: str, conversation: list[dict]) -> None:
+        super().__init__()
+        self.agent = agent
+        self.request = request
+        self.project_path = project_path
+        self.conversation = conversation
+
+    def _confirm(self, tool: str, arguments: dict, level: str) -> bool:
+        response = {"tool": tool, "arguments": arguments, "level": level, "event": threading.Event(), "approved": False}
+        self.confirmation_requested.emit(response)
+        response["event"].wait()
+        return bool(response["approved"])
+
+    def run(self) -> None:
+        try:
+            result = self.agent.process_request(self.request, project_path=self.project_path,
+                                                conversation=self.conversation, confirm_tool=self._confirm)
+        except Exception as exc:
+            result = {"success": False, "cancelled": self.agent.cancelled,
+                      "summary": f"Agent request failed: {exc}", "tool_calls": []}
+        self.result_ready.emit(result)
 
 
 class MainWindow(QMainWindow):
@@ -41,6 +72,8 @@ class MainWindow(QMainWindow):
         self.search_manager = SearchManager()
         self.voice_manager = VoiceManager()
         self.runtime = OpenCodeClient()
+        self.agent_loop: AgentLoop | None = None
+        self.agent_worker: AgentWorker | None = None
         self.task_manager = TaskManager()
         self.current_task = self.task_manager.create_task("Current session", project_path=self.config.data_dir)
         self.active_conversation = self.session_manager.create_conversation("New Chat", self.config.default_model())
@@ -173,6 +206,8 @@ class MainWindow(QMainWindow):
             self.conversation_list.addItem(conversation["title"])
 
     def new_chat(self) -> None:
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return
         self.active_conversation = self.session_manager.create_conversation("New Chat", self.model_selector.currentText() if hasattr(self, "model_selector") else self.config.default_model())
         self.prompt_input.clear()
         self._refresh_history()
@@ -202,21 +237,51 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.current_task = self.task_manager.create_task(f"Chat: {text[:32]}", project_path=self.config.data_dir, selected_model=self.model_selector.currentText())
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return
+        model_name = self.model_selector.currentText()
+        registry = __import__("app.tooling", fromlist=["ToolRegistry"]).ToolRegistry()
+        log_path = self.config.data_dir_path / "logs" / "action_log.jsonl"
+        def log_action(entry: dict) -> None:
+            record = {"timestamp": datetime.now(timezone.utc).isoformat(), **entry}
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.agent_loop = AgentLoop(registry=registry, model_adapter=OpenAICompatibleModelAdapter(registry, self.runtime, model_name), action_logger=log_action)
+        self.current_task = self.task_manager.create_task(f"Chat: {text[:32]}", project_path=self.config.data_dir, selected_model=model_name)
         self.task_manager.start(self.current_task.id)
         self.status_label.setText("Running")
 
         self.session_manager.save_message(self.active_conversation["id"], "user", text)
-        response = self.runtime.respond(text, self.model_selector.currentText())
-        self.session_manager.save_message(self.active_conversation["id"], "assistant", response)
-        self.task_manager.mark_completed(self.current_task.id)
-        self.status_label.setText("Ready")
         self.prompt_input.clear()
+        history = self.session_manager.get_messages(self.active_conversation["id"])
+        self.agent_worker = AgentWorker(self.agent_loop, text, self.config.data_dir, history[:-1])
+        self.agent_worker.confirmation_requested.connect(self._confirm_tool_call)
+        self.agent_worker.result_ready.connect(self._agent_finished)
+        self.agent_worker.start()
+
+    def _confirm_tool_call(self, request: dict) -> None:
+        details = json.dumps(request["arguments"], ensure_ascii=False, indent=2)
+        answer = QMessageBox.question(self, "Jarvis permission", f"Allow {request['level']} action: {request['tool']}?\n\n{details}", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        request["approved"] = answer == QMessageBox.StandardButton.Yes
+        request["event"].set()
+
+    def _agent_finished(self, result: dict) -> None:
+        response = result.get("summary") or "Jarvis did not return a response."
+        if result.get("cancelled"):
+            self.task_manager.get_task(self.current_task.id).status = "cancelled"
+        elif result.get("success"):
+            self.task_manager.mark_completed(self.current_task.id)
+        else:
+            self.task_manager.mark_failed(self.current_task.id, response)
+        self.session_manager.save_message(self.active_conversation["id"], "assistant", response)
+        self.status_label.setText("Stopped" if result.get("cancelled") else "Ready")
         self._refresh_history()
         self._populate_conversation_list()
 
     def stop_current_task(self) -> None:
-        self.current_task.request_stop()
+        if self.agent_loop is not None:
+            self.agent_loop.cancel()
+        self.task_manager.request_stop(self.current_task.id)
         self.status_label.setText("Stopped")
         self.task_manager.emergency_stop.stop()
 

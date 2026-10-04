@@ -1,4 +1,10 @@
-from app.agent import AgentLoop
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from app.agent import AgentLoop, OpenAICompatibleModelAdapter
+from app.config import AppConfig
+from app.opencode.client import OpenCodeClient
 from app.permissions.policy import PermissionPolicy
 from app.tooling import ToolRegistry
 
@@ -23,7 +29,18 @@ def test_permission_policy_enforces_confirmation_for_sensitive_actions():
 def test_agent_loop_executes_tool_request_and_returns_result(tmp_path):
     registry = ToolRegistry()
     target = tmp_path / "notes.txt"
-    loop = AgentLoop(registry=registry, permission_policy=PermissionPolicy())
+    class MockModel:
+        def __init__(self):
+            self.calls = 0
+
+        def decide(self, request, *, context=None):
+            self.calls += 1
+            if self.calls == 1:
+                return {"tool": "write_file", "arguments": {"path": str(target), "content": "hello"}}
+            assert context["agent_messages"][-1]["role"] == "tool"
+            return {"final_response": "Created the file after checking the tool result."}
+
+    loop = AgentLoop(registry=registry, permission_policy=PermissionPolicy(), model_adapter=MockModel())
 
     result = loop.process_request(
         "Write hello to notes.txt and read it back.",
@@ -32,8 +49,200 @@ def test_agent_loop_executes_tool_request_and_returns_result(tmp_path):
     )
 
     assert result["success"] is True
-    assert "hello" in target.read_text(encoding="utf-8") or "hello" in result["summary"].lower()
+    assert target.read_text(encoding="utf-8") == "hello"
+    assert result["summary"] == "Created the file after checking the tool result."
     assert result["tool_calls"]
+
+
+def test_agent_loop_without_model_does_not_guess_or_execute_tools(tmp_path):
+    target = tmp_path / "notes.txt"
+    result = AgentLoop(registry=ToolRegistry()).process_request(
+        "Write hello to notes.txt", project_path=str(tmp_path), allow_confirmation=True
+    )
+    assert result["success"] is True
+    assert not target.exists()
+    assert "No tool-calling model" in result["summary"]
+
+
+def test_model_adapter_sends_registered_tools_and_parses_model_tool_call(monkeypatch):
+    captured = {}
+
+    client = OpenCodeClient(base_url="https://provider.example/v1")
+    def fake_post(endpoint, payload):
+        captured["url"] = endpoint
+        captured["payload"] = payload
+        return {"choices": [{"message": {"tool_calls": [{"function": {
+            "name": "list_directory", "arguments": '{"path":"C:/work"}',
+        }}]}}]}
+
+    monkeypatch.setattr(client, "_post_json", fake_post)
+    decision = client.request_tool_decision(
+        request="List my project files", model_name="cloud-model",
+        tools=ToolRegistry().model_definitions(), messages=[], system_prompt="Use tools.",
+    )
+    assert decision == {"tool": "list_directory", "arguments": {"path": "C:/work"}}
+    assert captured["payload"]["model"] == "cloud-model"
+    assert any(tool["function"]["name"] == "list_directory" for tool in captured["payload"]["tools"])
+
+
+def test_model_adapter_forwards_stop_to_provider_client():
+    class Client:
+        cancelled = False
+
+        def cancel_current_request(self):
+            self.cancelled = True
+
+    registry = ToolRegistry()
+    client = Client()
+    adapter = OpenAICompatibleModelAdapter(registry, client, "model")
+    adapter.cancel()
+    assert adapter.cancelled is True
+    assert client.cancelled is True
+
+
+def test_provider_client_closes_active_socket_on_stop():
+    class Socket:
+        shutdown_called = False
+        close_called = False
+
+        def shutdown(self, _how):
+            self.shutdown_called = True
+
+        def close(self):
+            self.close_called = True
+
+    class Connection:
+        def __init__(self):
+            self.sock = Socket()
+            self.close_called = False
+
+        def close(self):
+            self.close_called = True
+
+    client = OpenCodeClient(base_url="https://provider.example/v1")
+    connection = Connection()
+    client._active_connection = connection
+    client.cancel_current_request()
+    assert connection.sock.shutdown_called and connection.sock.close_called
+    assert connection.close_called
+
+
+def test_stop_terminates_active_powershell_process():
+    registry = ToolRegistry()
+
+    class Process:
+        terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return -15
+
+    process = Process()
+    registry._active_process = process
+    registry.cancel_running()
+    assert process.terminated is True
+    assert registry._cancel_requested.is_set()
+
+
+def test_pyside_chat_runs_agent_worker_and_persists_model_reply(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(AppConfig(data_dir=str(tmp_path / "jarvis-data")))
+    window.runtime.is_available = lambda: True
+    window.runtime.request_tool_decision = lambda **_kwargs: {"final_response": "The agent loop answered."}
+    window.prompt_input.setText("Hi Jarvis")
+
+    window.send_message()
+    worker = window.agent_worker
+    assert worker is not None and worker.wait(3000)
+    application.processEvents()
+
+    messages = window.session_manager.get_messages(window.active_conversation["id"])
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[-1]["content"] == "The agent loop answered."
+    assert window.task_manager.get_task(window.current_task.id).status == "completed"
+    window.close()
+
+
+def test_provider_to_tool_to_provider_round_trip_and_approval(tmp_path, monkeypatch):
+    target = tmp_path / "agent-created.txt"
+    registry = ToolRegistry()
+    client = OpenCodeClient(base_url="https://provider.example/v1")
+    payloads = []
+
+    def fake_post(_endpoint, payload):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"choices": [{"message": {"tool_calls": [{"function": {
+                "name": "write_file",
+                "arguments": __import__("json").dumps({"path": str(target), "content": "model selected this"}),
+            }}]}}]}
+        assert payload["messages"][-1]["role"] == "tool"
+        assert "model selected this" in payload["messages"][-1]["content"]
+        return {"choices": [{"message": {"content": "The file was written and verified."}}]}
+
+    monkeypatch.setattr(client, "_post_json", fake_post)
+    approvals = []
+    logged = []
+    agent = AgentLoop(
+        registry=registry,
+        model_adapter=OpenAICompatibleModelAdapter(registry, client, "cloud-model"),
+        action_logger=logged.append,
+    )
+    result = agent.process_request(
+        "Create a file", project_path=str(tmp_path),
+        confirm_tool=lambda name, args, level: approvals.append((name, args, level)) or True,
+    )
+
+    assert result["success"] is True
+    assert result["summary"] == "The file was written and verified."
+    assert target.read_text(encoding="utf-8") == "model selected this"
+    assert approvals[0][0] == "write_file" and approvals[0][2] == "moderate"
+    assert len(logged) == 1 and logged[0]["result"]["success"] is True
+    assert len(payloads) == 2
+
+
+def test_stop_cancels_an_in_flight_model_request():
+    import threading
+
+    entered = threading.Event()
+
+    class CancellableModel:
+        def __init__(self):
+            self.cancelled = False
+
+        def decide(self, _request, *, context=None):
+            entered.set()
+            while not self.cancelled:
+                threading.Event().wait(0.01)
+            return {"final_response": "cancelled"}
+
+        def cancel(self):
+            self.cancelled = True
+
+    model = CancellableModel()
+    agent = AgentLoop(model_adapter=model)
+    completed = threading.Event()
+    result_holder = []
+
+    def run():
+        result_holder.append(agent.process_request("Do work"))
+        completed.set()
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert entered.wait(2)
+    agent.cancel()
+    assert completed.wait(2)
+    worker.join()
+    assert result_holder[0]["cancelled"] is True
 
 
 def test_agent_loop_stops_when_cancel_requested():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -19,7 +20,22 @@ class ToolDefinition:
 class ToolRegistry:
     def __init__(self) -> None:
         self.tools: dict[str, ToolDefinition] = {}
+        self._active_process: subprocess.Popen[str] | None = None
+        self._process_lock = threading.Lock()
+        self._cancel_requested = threading.Event()
         self._register_default_tools()
+
+    def cancel_running(self) -> None:
+        self._cancel_requested.set()
+        with self._process_lock:
+            process = self._active_process
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
     def _register_default_tools(self) -> None:
         self.register(
@@ -186,14 +202,27 @@ class ToolRegistry:
             return {"ok": False, "success": False, "error": str(exc)}
 
     def _run_powershell(self, command: str) -> dict[str, Any]:
+        if self._cancel_requested.is_set():
+            return {"ok": False, "success": False, "cancelled": True, "error": "PowerShell command cancelled."}
+        process: subprocess.Popen[str] | None = None
         try:
-            completed = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True, check=False)
+            process = subprocess.Popen(["powershell", "-NoProfile", "-Command", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            with self._process_lock:
+                self._active_process = process
+            if self._cancel_requested.is_set():
+                self.cancel_running()
+            stdout, stderr = process.communicate()
             return {
-                "ok": completed.returncode == 0,
-                "success": completed.returncode == 0,
-                "returncode": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
+                "ok": process.returncode == 0,
+                "success": process.returncode == 0,
+                "cancelled": self._cancel_requested.is_set(),
+                "returncode": process.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
             }
         except FileNotFoundError:
             return {"ok": False, "success": False, "error": "PowerShell is not available."}
+        finally:
+            with self._process_lock:
+                if self._active_process is process:
+                    self._active_process = None
