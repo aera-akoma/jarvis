@@ -1,14 +1,12 @@
 from __future__ import annotations
 
+from app.opencode.client import OpenCodeClient
+
 
 class ModelManager:
-    def __init__(self) -> None:
-        self.available_models = [
-            "OpenCode Zen",
-            "OpenAI GPT-4o mini",
-            "Claude Sonnet",
-            "Gemini 2.5 Pro",
-        ]
+    def __init__(self, client: OpenCodeClient | None = None) -> None:
+        self.client = client or OpenCodeClient()
 
     def list_models(self) -> list[str]:
-        return list(self.available_models)
+        models = self.client.available_models()
+        return list(models)

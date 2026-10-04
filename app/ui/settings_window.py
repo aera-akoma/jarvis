@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -35,6 +37,7 @@ class SettingsWindow(QDialog):
 
         self.theme_input = QLineEdit(self.settings.get("theme", self.config.theme) or self.config.theme)
         self.model_input = QLineEdit(self.settings.get("default_model", self.config.default_model()) or self.config.default_model())
+        self.base_url_input = QLineEdit(self.settings.get("openai_base_url") or os.getenv("JARVIS_OPENAI_BASE_URL") or os.getenv("OPENCODE_BASE_URL") or "")
         self.api_key_input = QLineEdit()
         self.api_key_input.setPlaceholderText("Enter API key")
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -43,6 +46,7 @@ class SettingsWindow(QDialog):
 
         form.addRow("Theme", self.theme_input)
         form.addRow("Default model", self.model_input)
+        form.addRow("Runtime URL", self.base_url_input)
         form.addRow("API key", self.api_key_input)
         layout.addLayout(form)
         layout.addWidget(self.startup_checkbox)
@@ -64,9 +68,20 @@ class SettingsWindow(QDialog):
     def save_settings(self) -> None:
         self.settings.set("theme", self.theme_input.text().strip() or self.config.theme)
         self.settings.set("default_model", self.model_input.text().strip() or self.config.default_model())
+
+        runtime_url = self.base_url_input.text().strip()
+        if runtime_url:
+            self.settings.set("openai_base_url", runtime_url)
+            os.environ["JARVIS_OPENAI_BASE_URL"] = runtime_url
+        elif os.getenv("JARVIS_OPENAI_BASE_URL"):
+            self.settings.set("openai_base_url", "")
+            os.environ.pop("JARVIS_OPENAI_BASE_URL", None)
+
         if self.api_key_input.text().strip():
             self.credentials.set("OpenAI", self.api_key_input.text().strip())
+            os.environ["OPENCODE_API_KEY"] = self.api_key_input.text().strip()
             QMessageBox.information(self, "Saved", "Your API key has been stored securely.")
+
         if self.startup_checkbox.isChecked():
             self.startup_manager.enable_startup()
         else:

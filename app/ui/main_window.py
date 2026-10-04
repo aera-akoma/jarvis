@@ -24,6 +24,7 @@ from app.core.session_manager import SessionManager
 from app.memory.memory_manager import MemoryManager
 from app.opencode.client import OpenCodeClient
 from app.search.search_manager import SearchManager
+from app.tasks import TaskManager
 from app.ui.memory_view import MemoryView
 from app.ui.settings_window import SettingsWindow
 from app.voice.voice_manager import VoiceManager
@@ -40,12 +41,28 @@ class MainWindow(QMainWindow):
         self.search_manager = SearchManager()
         self.voice_manager = VoiceManager()
         self.runtime = OpenCodeClient()
+        self.task_manager = TaskManager()
+        self.current_task = self.task_manager.create_task("Current session", project_path=self.config.data_dir)
         self.active_conversation = self.session_manager.create_conversation("New Chat", self.config.default_model())
         self.setWindowTitle(self.config.app_name)
         self.resize(1200, 800)
         self._build_ui()
         self._refresh_history()
         self.apply_theme(self.config.theme)
+
+    def _populate_model_selector(self) -> None:
+        self.model_selector.clear()
+        models = self.runtime.available_models()
+        if not models:
+            self.model_selector.addItem("OpenCode runtime unavailable")
+            self.model_selector.setEnabled(False)
+            return
+
+        self.model_selector.addItems(models)
+        if self.config.default_model() in models:
+            self.model_selector.setCurrentText(self.config.default_model())
+        else:
+            self.model_selector.setCurrentIndex(0)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -101,6 +118,12 @@ class MainWindow(QMainWindow):
         header_label.setObjectName("headerLabel")
         header.addWidget(header_label)
         header.addStretch()
+        self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("statusLabel")
+        header.addWidget(self.status_label)
+        self.emergency_stop_button = QPushButton("🛑 STOP")
+        self.emergency_stop_button.clicked.connect(self.stop_current_task)
+        header.addWidget(self.emergency_stop_button)
         header_button = QPushButton("⚙")
         header_button.clicked.connect(self.show_settings)
         header.addWidget(header_button)
@@ -128,8 +151,7 @@ class MainWindow(QMainWindow):
         self.prompt_input.returnPressed.connect(self.send_message)
 
         self.model_selector = QComboBox()
-        self.model_selector.addItems(self.runtime.available_models())
-        self.model_selector.setCurrentText(self.config.default_model())
+        self._populate_model_selector()
 
         send = QPushButton("Send →")
         send.clicked.connect(self.send_message)
@@ -172,12 +194,31 @@ class MainWindow(QMainWindow):
         if not text:
             return
 
+        if not self.runtime.is_available():
+            QMessageBox.warning(
+                self,
+                "OpenCode runtime unavailable",
+                "The configured OpenCode runtime is not available. Set JARVIS_OPENAI_BASE_URL and any required credentials, then retry.",
+            )
+            return
+
+        self.current_task = self.task_manager.create_task(f"Chat: {text[:32]}", project_path=self.config.data_dir, selected_model=self.model_selector.currentText())
+        self.task_manager.start(self.current_task.id)
+        self.status_label.setText("Running")
+
         self.session_manager.save_message(self.active_conversation["id"], "user", text)
         response = self.runtime.respond(text, self.model_selector.currentText())
         self.session_manager.save_message(self.active_conversation["id"], "assistant", response)
+        self.task_manager.mark_completed(self.current_task.id)
+        self.status_label.setText("Ready")
         self.prompt_input.clear()
         self._refresh_history()
         self._populate_conversation_list()
+
+    def stop_current_task(self) -> None:
+        self.current_task.request_stop()
+        self.status_label.setText("Stopped")
+        self.task_manager.emergency_stop.stop()
 
     def show_settings(self) -> None:
         window = SettingsWindow(self.config)
