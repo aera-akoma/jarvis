@@ -98,8 +98,25 @@ class ToolRegistry:
     def register(self, tool: ToolDefinition) -> None:
         self.tools[tool.name] = tool
 
+    def get(self, name: str) -> ToolDefinition | None:
+        return self.tools.get(name)
+
     def list_tools(self) -> list[str]:
         return sorted(self.tools.keys())
+
+    def model_definitions(self) -> list[dict[str, Any]]:
+        definitions: list[dict[str, Any]] = []
+        for name in sorted(self.tools):
+            tool = self.tools[name]
+            definitions.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "permission_level": tool.permission_level,
+                }
+            )
+        return definitions
 
     def execute(self, name: str, target: str | None = None, params: dict[str, Any] | None = None) -> dict[str, Any]:
         tool = self.tools.get(name)
