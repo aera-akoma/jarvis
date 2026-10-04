@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import os
 
 
 class StartupManager:
@@ -16,12 +17,13 @@ class StartupManager:
         return self.startup_file.exists()
 
     def enable_startup(self) -> None:
-        project_root = Path(__file__).resolve().parent.parent
-        script = (
-            "@echo off\r\n"
-            f'cd /d "{project_root}"\r\n'
-            f'"{sys.executable}" -m app\r\n'
-        )
+        executable = Path(sys.executable).resolve()
+        if getattr(sys, "frozen", False):
+            command = f'"{executable}"'
+        else:
+            project_root = Path(__file__).resolve().parent.parent
+            command = f'cd /d "{project_root}" && "{executable}" -m app'
+        script = "@echo off\r\n" + command + "\r\n"
         self.startup_file.write_text(script, encoding="utf-8")
 
     def disable_startup(self) -> None:
