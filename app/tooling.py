@@ -42,6 +42,24 @@ class ToolRegistry:
         )
         self.register(
             ToolDefinition(
+                name="create_file",
+                description="Create a new file with content.",
+                permission_level="moderate",
+                parameters={"path": "file path", "content": "file contents"},
+                handler=self._create_file,
+            )
+        )
+        self.register(
+            ToolDefinition(
+                name="create_directory",
+                description="Create a directory tree.",
+                permission_level="moderate",
+                parameters={"path": "directory path"},
+                handler=self._create_directory,
+            )
+        )
+        self.register(
+            ToolDefinition(
                 name="list_directory",
                 description="List files in a directory.",
                 permission_level="safe",
@@ -80,62 +98,85 @@ class ToolRegistry:
     def register(self, tool: ToolDefinition) -> None:
         self.tools[tool.name] = tool
 
+    def list_tools(self) -> list[str]:
+        return sorted(self.tools.keys())
+
     def execute(self, name: str, target: str | None = None, params: dict[str, Any] | None = None) -> dict[str, Any]:
         tool = self.tools.get(name)
         if tool is None:
-            return {"ok": False, "error": f"Unknown tool: {name}"}
+            return {"ok": False, "success": False, "error": f"Unknown tool: {name}"}
 
         payload = dict(params or {})
         if target is not None and "path" not in payload and "target" not in payload:
             payload["path"] = target
         if tool.handler is None:
-            return {"ok": False, "error": f"Tool {name} has no handler"}
+            return {"ok": False, "success": False, "error": f"Tool {name} has no handler"}
         result = tool.handler(**payload)
-        return result if isinstance(result, dict) else {"ok": True, "result": result}
+        if isinstance(result, dict):
+            result.setdefault("success", result.get("ok", False))
+            result.setdefault("ok", result.get("success", False))
+            return result
+        return {"ok": True, "success": True, "result": result}
 
     def _read_file(self, path: str) -> dict[str, Any]:
         file_path = Path(path)
         if not file_path.exists():
-            return {"ok": False, "error": f"File not found: {path}"}
-        return {"ok": True, "content": file_path.read_text(encoding="utf-8")}
+            return {"ok": False, "success": False, "error": f"File not found: {path}"}
+        return {"ok": True, "success": True, "path": str(file_path), "content": file_path.read_text(encoding="utf-8")}
 
     def _write_file(self, path: str, content: str = "") -> dict[str, Any]:
         file_path = Path(path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
-        return {"ok": True, "path": str(file_path), "content": content}
+        return {"ok": True, "success": True, "path": str(file_path), "content": content}
+
+    def _create_file(self, path: str, content: str = "") -> dict[str, Any]:
+        file_path = Path(path)
+        if file_path.exists():
+            return {"ok": False, "success": False, "error": f"File already exists: {path}"}
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+        return {"ok": True, "success": True, "path": str(file_path), "content": content}
+
+    def _create_directory(self, path: str) -> dict[str, Any]:
+        directory = Path(path)
+        if directory.exists():
+            return {"ok": True, "success": True, "path": str(directory), "created": False}
+        directory.mkdir(parents=True, exist_ok=True)
+        return {"ok": True, "success": True, "path": str(directory), "created": True}
 
     def _list_directory(self, path: str) -> dict[str, Any]:
         directory = Path(path)
         if not directory.exists():
-            return {"ok": False, "error": f"Directory not found: {path}"}
+            return {"ok": False, "success": False, "error": f"Directory not found: {path}"}
         entries = sorted(p.name for p in directory.iterdir())
-        return {"ok": True, "entries": entries}
+        return {"ok": True, "success": True, "path": str(directory), "entries": entries}
 
     def _search_files(self, path: str, pattern: str = "*") -> dict[str, Any]:
         directory = Path(path)
         if not directory.exists():
-            return {"ok": False, "error": f"Directory not found: {path}"}
+            return {"ok": False, "success": False, "error": f"Directory not found: {path}"}
         matches = sorted(str(p) for p in directory.rglob(pattern) if p.is_file())
-        return {"ok": True, "matches": matches}
+        return {"ok": True, "success": True, "path": str(directory), "matches": matches}
 
     def _open_application(self, path: str) -> dict[str, Any]:
         if not hasattr(os, "startfile"):
-            return {"ok": False, "error": "Windows startfile is not available."}
+            return {"ok": False, "success": False, "error": "Windows startfile is not available."}
         try:
             os.startfile(path)
-            return {"ok": True, "path": path}
+            return {"ok": True, "success": True, "path": path}
         except OSError as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "success": False, "error": str(exc)}
 
     def _run_powershell(self, command: str) -> dict[str, Any]:
         try:
             completed = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True, check=False)
             return {
                 "ok": completed.returncode == 0,
+                "success": completed.returncode == 0,
                 "returncode": completed.returncode,
                 "stdout": completed.stdout,
                 "stderr": completed.stderr,
             }
         except FileNotFoundError:
-            return {"ok": False, "error": "PowerShell is not available."}
+            return {"ok": False, "success": False, "error": "PowerShell is not available."}

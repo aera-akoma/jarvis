@@ -35,6 +35,10 @@ class JarvisTask:
         self.cancelled = False
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
+    def mark_waiting_confirmation(self) -> None:
+        self.status = "waiting_confirmation"
+        self.updated_at = datetime.now(timezone.utc).isoformat()
+
     def request_stop(self) -> None:
         self.cancelled = True
         self.status = "cancelled"
@@ -71,6 +75,11 @@ class TaskManager:
     def start(self, task_id: str) -> JarvisTask:
         task = self.get_task(task_id)
         task.mark_running()
+        return task
+
+    def mark_waiting_confirmation(self, task_id: str) -> JarvisTask:
+        task = self.get_task(task_id)
+        task.mark_waiting_confirmation()
         return task
 
     def request_stop(self, task_id: str) -> JarvisTask:
