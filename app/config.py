@@ -26,7 +26,7 @@ class AppConfig:
         self.database_path = self.data_dir_path / self.db_name
 
     def default_model(self) -> str:
-        return "OpenCode Zen"
+        return "deepseek-v4-flash"
 
 
 def _default_data_dir() -> Path:

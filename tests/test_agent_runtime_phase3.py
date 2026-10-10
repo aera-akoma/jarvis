@@ -170,8 +170,13 @@ def test_pyside_chat_runs_approved_tool_and_persists_model_reply(tmp_path, monke
     from app.ui.main_window import MainWindow
 
     application = QApplication.instance() or QApplication([])
+    monkeypatch.setattr("app.ui.main_window.OpenCodeClient.available_models", lambda _self: ["test-model"])
     window = MainWindow(AppConfig(data_dir=str(tmp_path / "jarvis-data")))
-    window.runtime.is_available = lambda: True
+    deadline = time.monotonic() + 3
+    while window._models_loading and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
+    assert window.model_selector.isEnabled()
     target = tmp_path / "created-through-ui.txt"
     model_replies = iter([
         {"tool": "write_file", "arguments": {"path": str(target), "content": "from the UI tool flow"}},

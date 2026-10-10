@@ -4,6 +4,7 @@ import json
 import http.client
 import base64
 import os
+import socket
 import threading
 import uuid
 from urllib import error, request
@@ -14,18 +15,34 @@ from app.security.credentials import CredentialStore
 
 
 class OpenCodeClient:
-    DEFAULT_MODEL = "OpenCode Zen"
+    DEFAULT_MODEL = "deepseek-v4-flash"
+    # OpenCode Zen's /models endpoint lists models from several API families.
+    # Jarvis currently sends OpenAI Chat Completions requests, so expose only
+    # the models Zen documents for /v1/chat/completions.
+    ZEN_CHAT_COMPLETION_MODELS = frozenset({
+        "qwen3.8-max",
+        "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "minimax-m3", "minimax-m2.7", "minimax-m2.5",
+        "glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5",
+        "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "kimi-k3",
+        "mistral-large-4", "big-pickle", "space-bunny-free",
+        "longcat-2.5-preview-free", "exo-free", "fledge-alpha-free",
+        "mimo-v2.6-flash-free", "mimo-v2.5-free", "ling-3.1-flash-free",
+        "ling-3.0-flash-fin-free", "nemotron-3-ultra-free",
+        "nemotron-3.5-lightning-free",
+    })
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None) -> None:
         raw_base_url = base_url or os.getenv("JARVIS_OPENAI_BASE_URL") or os.getenv("OPENCODE_BASE_URL") or os.getenv("OPENAI_BASE_URL")
         self.base_url = raw_base_url.rstrip("/") if raw_base_url else None
         stored_key = None
-        if api_key is None and not (os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY")):
+        if api_key is None:
             try:
                 stored_key = CredentialStore().get("OpenAI")
             except (OSError, RuntimeError):
                 stored_key = None
-        self.api_key = api_key or os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY") or stored_key
+        self.api_key = api_key or stored_key or os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY")
         self.session_id: str | None = None
         self.last_error: str | None = None
         self._model_cache: list[str] = []
@@ -137,34 +154,116 @@ class OpenCodeClient:
                     models.append(str(item["name"]))
         return models
 
+    def _opencode_api_kind(self, path: str | None = None) -> str | None:
+        """Identify OpenCode's Zen and Console Chat Completions base URLs."""
+        if not self.base_url:
+            return None
+        parts = urlsplit(self.base_url)
+        if (parts.hostname or "").lower() != "opencode.ai":
+            return None
+        endpoint_path = (path if path is not None else parts.path).rstrip("/")
+        if endpoint_path == "/zen/v1":
+            return "zen"
+        if endpoint_path == "/inference/openai/v1":
+            return "console"
+        return None
+
+    def _chat_completion_endpoints(self) -> list[str]:
+        if not self.base_url:
+            return []
+        if self._opencode_api_kind():
+            return [f"{self.base_url}/chat/completions"]
+        return [
+            f"{self.base_url}/chat/completions",
+            f"{self.base_url}/v1/chat/completions",
+            f"{self.base_url}/openai/v1/chat/completions",
+        ]
+
     def discover_models(self) -> list[str]:
         if not self.base_url:
             self._model_cache = []
-            self.last_error = "OpenCode runtime unavailable. Configure JARVIS_OPENAI_BASE_URL first."
+            self.last_error = "No model API URL is configured. Open Settings and enter your provider's base URL."
             return []
 
-        self.last_error = None
-        for root in self._runtime_urls():
-            for suffix in ("", "/models", "/v1/models", "/api/models", "/openai/v1/models", "/inference/openai/v1/models"):
-                endpoint = root.rstrip("/") + suffix
-                req = request_module.Request(endpoint, headers=self.headers(), method="GET")
-                try:
-                    with request_module.urlopen(req, timeout=10) as response:
-                        body = response.read().decode("utf-8", errors="replace")
-                        payload = json.loads(body)
-                        models = self._coerce_models(payload)
-                        if models:
-                            self._model_cache = models
-                            return models
-                except (error.URLError, ValueError, json.JSONDecodeError, OSError):
-                    continue
+        parts = urlsplit(self.base_url)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            self._model_cache = []
+            self.last_error = "The model API URL must be a valid HTTP or HTTPS base URL."
+            return []
 
-        self._model_cache = []
-        self.last_error = "OpenCode runtime unavailable. No model catalog was returned from the configured runtime."
-        return []
+        base_path = parts.path.rstrip("/")
+        api_kind = self._opencode_api_kind()
+        if api_kind == "console":
+            # Console inference uses a shared catalog endpoint separate from
+            # the family-specific /openai/v1/chat/completions URL.
+            path = "/inference/v1/models"
+        else:
+            path = base_path
+            if not path.endswith("/models"):
+                path = f"{path}/models" if path else "/models"
+        endpoint = parts._replace(path=path).geturl()
+        headers = self.headers()
+        # Zen exposes its model catalog publicly. Do not send the user's API
+        # key on a catalog lookup; credentials are needed only for inference.
+        if api_kind == "zen" and path.rstrip("/").endswith("/zen/v1/models"):
+            headers.pop("Authorization", None)
+        req = request_module.Request(endpoint, headers=headers, method="GET")
+        try:
+            with request_module.urlopen(req, timeout=6) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        except error.HTTPError as exc:
+            self._model_cache = []
+            if exc.code == 401:
+                self.last_error = "The provider rejected the credential (HTTP 401). It may be invalid, expired, or revoked; replace it in Settings."
+            elif exc.code == 403:
+                self.last_error = "OpenCode denied access (HTTP 403). Check that this key belongs to the right Zen account/workspace and that the account can use Zen and the selected models."
+            elif exc.code == 404:
+                self.last_error = "The provider has no /models endpoint at this URL. Enter the API base URL, not a chat-completions URL."
+            elif exc.code == 429:
+                self.last_error = "The provider rate-limited the request (HTTP 429). Check your account limits or credits."
+            else:
+                self.last_error = f"The provider returned HTTP {exc.code} while listing models."
+            return []
+        except error.URLError as exc:
+            self._model_cache = []
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                self.last_error = "The provider timed out while listing models. Check your connection and try again."
+            else:
+                self.last_error = "Jarvis could not reach the provider. Check the URL, internet connection, and firewall."
+            return []
+        except (TimeoutError, socket.timeout):
+            self._model_cache = []
+            self.last_error = "The provider timed out while listing models. Check your connection and try again."
+            return []
+        except (ValueError, json.JSONDecodeError):
+            self._model_cache = []
+            self.last_error = "The provider returned invalid JSON from /models. Check that the URL is an OpenAI-compatible API base."
+            return []
+        except OSError:
+            self._model_cache = []
+            self.last_error = "Jarvis could not connect securely to the provider. Check your internet connection and system date."
+            return []
+
+        models = self._coerce_models(payload)
+        if api_kind in {"zen", "console"}:
+            models = [model for model in models if model in self.ZEN_CHAT_COMPLETION_MODELS]
+        if not models:
+            self._model_cache = []
+            self.last_error = (
+                "OpenCode returned models, but none use the Chat Completions API required by Jarvis."
+                if api_kind in {"zen", "console"}
+                else "The provider responded, but its /models response contained no model IDs."
+            )
+            return []
+        self._model_cache = models
+        self.last_error = None
+        return list(models)
 
     def available_models(self) -> list[str]:
-        return self.discover_models() or self._model_cache
+        if self._model_cache:
+            return list(self._model_cache)
+        return self.discover_models()
 
     def is_available(self) -> bool:
         return bool(self.available_models())
@@ -214,7 +313,7 @@ class OpenCodeClient:
                    "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": request}, *prior],
                    "tools": api_tools, "tool_choice": "auto"}
         last_error = None
-        for endpoint in (f"{self.base_url}/chat/completions", f"{self.base_url}/v1/chat/completions", f"{self.base_url}/openai/v1/chat/completions"):
+        for endpoint in self._chat_completion_endpoints():
             try:
                 body = self._post_json(endpoint, payload)
                 message = body["choices"][0]["message"]
@@ -263,12 +362,7 @@ class OpenCodeClient:
         if not self.base_url:
             return ""
 
-        candidate_endpoints = [
-            f"{self.base_url}/chat/completions",
-            f"{self.base_url}/v1/chat/completions",
-            f"{self.base_url}/openai/v1/chat/completions",
-            f"{self.base_url}/inference/openai/v1/chat/completions",
-        ]
+        candidate_endpoints = self._chat_completion_endpoints()
 
         for endpoint in candidate_endpoints:
             data = json.dumps(payload).encode("utf-8")

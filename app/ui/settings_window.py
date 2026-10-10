@@ -32,6 +32,7 @@ class SettingsWindow(QDialog):
         self.config = config or AppConfig()
         self.settings = SettingsManager(self.config)
         self.credentials = CredentialStore()
+        self._key_status_text = self._get_key_status()
         self.startup_manager = StartupManager()
         self.export_import = ExportImportManager(database_path=str(self.config.database_path), root=str(self.config.data_dir_path / "exports"))
         self.setWindowTitle("Jarvis Settings")
@@ -46,7 +47,9 @@ class SettingsWindow(QDialog):
         self.model_input = QLineEdit(self.settings.get("default_model", self.config.default_model()) or self.config.default_model())
         self.base_url_input = QLineEdit(self.settings.get("openai_base_url") or os.getenv("JARVIS_OPENAI_BASE_URL") or os.getenv("OPENCODE_BASE_URL") or "")
         self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("Enter API key")
+        self.api_key_input.setPlaceholderText(
+            "Leave blank to keep the saved key" if self._key_status_text.startswith("A key is saved") else "Enter API key"
+        )
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.startup_checkbox = QCheckBox("Launch Jarvis on Windows startup")
         self.startup_checkbox.setChecked(self.startup_manager.is_enabled())
@@ -78,9 +81,19 @@ class SettingsWindow(QDialog):
 
         layout.addLayout(buttons)
 
-        status_text = self.credentials.storage_error or "Credentials are stored using Windows DPAPI protected storage."
-        status = QLabel(status_text)
-        layout.addWidget(status)
+        self.credential_status = QLabel(self._key_status_text)
+        self.credential_status.setWordWrap(True)
+        layout.addWidget(self.credential_status)
+
+    def _get_key_status(self) -> str:
+        if self.credentials.storage_error:
+            return f"Secure credential storage is unavailable: {self.credentials.storage_error}"
+        try:
+            if self.credentials.get("OpenAI"):
+                return "A key is saved securely with Windows DPAPI (hidden). This confirms local storage only; provider acceptance is checked when you send a message. Leave blank to keep it."
+            return "No API key is saved. Enter the provider key above; it will be stored securely with Windows DPAPI."
+        except (OSError, RuntimeError) as exc:
+            return f"Could not check secure credential storage: {exc}"
 
     def _ask_passphrase(self, title: str, prompt: str) -> str | None:
         value, accepted = QInputDialog.getText(self, title, prompt, QLineEdit.EchoMode.Password)
@@ -174,14 +187,20 @@ class SettingsWindow(QDialog):
             self.settings.set("openai_base_url", "")
             os.environ.pop("JARVIS_OPENAI_BASE_URL", None)
 
-        if self.api_key_input.text().strip():
+        new_api_key = self.api_key_input.text().strip()
+        if new_api_key:
             try:
-                self.credentials.set("OpenAI", self.api_key_input.text().strip())
+                self.credentials.replace_all("OpenAI", new_api_key)
             except (OSError, RuntimeError) as exc:
                 QMessageBox.critical(self, "Secure storage unavailable", str(exc))
                 return
-            os.environ["OPENCODE_API_KEY"] = self.api_key_input.text().strip()
-            QMessageBox.information(self, "Saved", "Your API key has been stored securely.")
+            self.credential_status.setText(
+                "The new key replaced the previously saved key. Exactly one key is kept in Jarvis secure storage."
+            )
+            QMessageBox.information(
+                self, "Saved securely",
+                "The new API key replaced all previously stored keys and was saved with Windows DPAPI. Jarvis checks whether the provider accepts it when you send a message. For security, the field stays blank when you reopen Settings.",
+            )
 
         if self.startup_checkbox.isChecked():
             self.startup_manager.enable_startup()
@@ -196,4 +215,7 @@ class SettingsWindow(QDialog):
             QMessageBox.critical(self, "Could not clear credential", str(exc))
             return
         self.api_key_input.clear()
+        self.credential_status.setText(
+            "No API key is saved. Enter the provider key above; it will be stored securely with Windows DPAPI."
+        )
         QMessageBox.information(self, "Removed", "The stored API key has been cleared.")

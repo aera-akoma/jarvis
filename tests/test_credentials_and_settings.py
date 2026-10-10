@@ -51,3 +51,29 @@ def test_credential_store_refuses_legacy_plaintext_without_overwriting(tmp_path)
     with pytest.raises(RuntimeError, match="will not load"):
         store.set("OpenAI", "replacement-secret")
     assert path.read_text(encoding="utf-8") == original
+
+
+def test_settings_window_says_saved_api_key_is_hidden_and_kept_when_blank(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from app.ui.settings_window import SettingsWindow
+
+    class SavedCredentialStore:
+        storage_error = None
+
+        def __init__(self):
+            self.value = "test-only-secret"
+
+        def get(self, name):
+            assert name == "OpenAI"
+            return self.value
+
+    monkeypatch.setattr("app.ui.settings_window.CredentialStore", SavedCredentialStore)
+    app = QApplication.instance() or QApplication([])
+    window = SettingsWindow(AppConfig(data_dir=str(tmp_path)))
+
+    assert window.api_key_input.text() == ""
+    assert "A key is saved securely" in window.credential_status.text()
+    assert "Leave blank to keep it" in window.credential_status.text()
+    assert "provider acceptance is checked when you send a message" in window.credential_status.text()
+    window.close()
+    app.processEvents()

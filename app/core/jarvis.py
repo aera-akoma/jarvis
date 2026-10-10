@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 @dataclass
 class JarvisCore:
     name: str = "Jarvis"
-    model_name: str = "OpenCode Zen"
+    model_name: str = "deepseek-v4-flash"
     status: str = "ready"
     session_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)

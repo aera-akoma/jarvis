@@ -125,6 +125,25 @@ class CredentialStore:
                 self._store[key] = old_value
             raise
 
+    def replace_all(self, key: str, value: str) -> None:
+        """Atomically replace the credential file with exactly one credential."""
+        self._require_available()
+        if not key:
+            raise ValueError("Credential name must not be empty.")
+        if not value:
+            raise ValueError("Credential value must not be empty.")
+
+        previous_store = self._store
+        self._store = {key: base64.b64encode(value.encode("utf-8")).decode("ascii")}
+        try:
+            self._save()
+        except Exception:
+            self._store = previous_store
+            raise
+        # Drop references to superseded in-memory credential values after the
+        # single-entry file has been safely written.
+        previous_store.clear()
+
     def get(self, key: str) -> str | None:
         self._require_available()
         value = self._store.get(key)

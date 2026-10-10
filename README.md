@@ -52,6 +52,14 @@ python -m app
 
 This starts the desktop app from the project source tree.
 
+## Configure a model provider
+
+Open **Settings** from Jarvis and enter the provider's API base URL and API key. The key is stored with Windows DPAPI. Entering a non-empty key replaces the saved credential store with exactly that one key; leaving the box empty keeps the saved key. The key box intentionally stays empty after saving, and the status below it confirms whether a key is stored.
+
+Jarvis currently uses the OpenAI-compatible Chat Completions API. For an OpenCode Console service-account key, set Runtime URL to `https://opencode.ai/inference/openai/v1`; Jarvis fetches its model catalog separately from `/inference/v1/models` and sends chat requests to `/inference/openai/v1/chat/completions`. For an OpenCode Zen API key, use `https://opencode.ai/zen/v1`. Jarvis filters OpenCode's mixed model catalog to models documented for Chat Completions and defaults to `deepseek-v4-flash`. Models offered only through `/responses` or `/messages` are not supported by this client. The local `opencode serve` session API is a different protocol and is not a compatible URL for this version of Jarvis.
+
+Model discovery runs in a background worker with a six-second request timeout. If the model list is unavailable, Jarvis shows a provider error and keeps the chat window responsive. Logs are stored at `%APPDATA%\Jarvis\logs\jarvis.log`.
+
 ## Run tests
 
 ```powershell

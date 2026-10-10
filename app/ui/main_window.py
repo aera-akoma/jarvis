@@ -125,6 +125,22 @@ class SpeechOutputWorker(QThread):
             self.result_ready.emit({"success": False, "error": str(exc)})
 
 
+class ModelListWorker(QThread):
+    models_ready = Signal(int, object, str)
+
+    def __init__(self, runtime, generation: int, parent=None) -> None:
+        super().__init__(parent)
+        self.runtime = runtime
+        self.generation = generation
+
+    def run(self) -> None:
+        try:
+            models = self.runtime.available_models()
+            self.models_ready.emit(self.generation, models, self.runtime.last_error or "")
+        except Exception:
+            self.models_ready.emit(self.generation, [], "Model discovery failed unexpectedly. Check Jarvis logs and Settings.")
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: Optional[AppConfig] = None) -> None:
         if QApplication.instance() is None:
@@ -133,7 +149,11 @@ class MainWindow(QMainWindow):
         self.config = config or AppConfig()
         self.session_manager = SessionManager(self.config)
         self.settings_manager = SettingsManager(self.config)
-        self.default_model_name = self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()
+        configured_model = self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()
+        if configured_model == "OpenCode Zen":
+            configured_model = self.config.default_model()
+            self.settings_manager.set("default_model", configured_model)
+        self.default_model_name = configured_model
         self.memory_manager = MemoryManager(self.config.database_path)
         self.memory_candidate_extractor = MemoryCandidateExtractor()
         self.pending_memory_candidates: list[dict] = []
@@ -148,12 +168,21 @@ class MainWindow(QMainWindow):
         self.speech_input_worker: SpeechInputWorker | None = None
         self.speech_output_worker: SpeechOutputWorker | None = None
         self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
+        self._model_workers: list[ModelListWorker] = []
+        self._model_load_generation = 0
+        self._models_loading = False
+        self._model_connection_error = ""
         self.windows_controller = WindowsController()
         self.agent_loop: AgentLoop | None = None
         self.agent_worker: AgentWorker | None = None
         self.task_manager = TaskManager()
         self.current_task = self.task_manager.create_task("Current session", project_path=self.config.data_dir)
-        self.active_conversation = self.session_manager.create_conversation("New Chat", self.default_model_name)
+        conversations = self.session_manager.list_conversations()
+        self.active_conversation = (
+            conversations[0]
+            if conversations
+            else self.session_manager.create_conversation("New Chat", self.default_model_name)
+        )
         self.setWindowTitle(self.config.app_name)
         self.resize(1200, 800)
         self._build_ui()
@@ -161,14 +190,49 @@ class MainWindow(QMainWindow):
         self.apply_theme(self.config.theme)
 
     def _populate_model_selector(self) -> None:
+        self._model_load_generation += 1
+        generation = self._model_load_generation
+        self._models_loading = True
+        self._model_connection_error = ""
         self.model_selector.clear()
-        models = self.runtime.available_models()
+        self.model_selector.addItem("Loading models…")
+        self.model_selector.setEnabled(False)
+        self.status_label.setText("Checking model connection…")
+        worker = ModelListWorker(self.runtime, generation, self)
+        worker.models_ready.connect(self._on_models_loaded)
+        worker.finished.connect(self._on_model_worker_finished)
+        self._model_workers.append(worker)
+        worker.start()
+
+    def _on_model_worker_finished(self) -> None:
+        worker = self.sender()
+        if worker in self._model_workers:
+            self._model_workers.remove(worker)
+        worker.deleteLater()
+
+    def _on_models_loaded(self, generation: int, models, error_message: str) -> None:
+        if generation != self._model_load_generation:
+            return
+        self._models_loading = False
+        self._model_connection_error = error_message
+        self.model_selector.clear()
         if not models:
-            self.model_selector.addItem("OpenCode runtime unavailable")
+            if "HTTP 403" in error_message:
+                failure_label = "Access denied (HTTP 403)"
+            elif "HTTP 401" in error_message:
+                failure_label = "Authentication failed (HTTP 401)"
+            else:
+                failure_label = "Model connection unavailable"
+            self.model_selector.addItem(failure_label)
             self.model_selector.setEnabled(False)
+            self.model_selector.setToolTip(error_message)
+            self.status_label.setText(failure_label)
             return
 
         self.model_selector.addItems(models)
+        self.model_selector.setEnabled(True)
+        self.model_selector.setToolTip("")
+        self.status_label.setText("Ready")
         if self.default_model_name in models:
             self.model_selector.setCurrentText(self.default_model_name)
         else:
@@ -313,15 +377,22 @@ class MainWindow(QMainWindow):
         if not text:
             return
 
-        if not self.runtime.is_available():
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return
+        if self._models_loading:
             QMessageBox.warning(
                 self,
-                "OpenCode runtime unavailable",
-                "The configured OpenCode runtime is not available. Set JARVIS_OPENAI_BASE_URL and any required credentials, then retry.",
+                "Checking model connection",
+                "Jarvis is still checking the provider. Wait for the model selector to finish loading, then retry.",
             )
             return
-
-        if self.agent_worker is not None and self.agent_worker.isRunning():
+        if not self.model_selector.isEnabled():
+            detail = self._model_connection_error or "No compatible model was returned by the configured provider."
+            QMessageBox.warning(
+                self,
+                "Model connection unavailable",
+                f"{detail}\n\nOpen Settings to check the API key and runtime URL, then save and retry.",
+            )
             return
         model_name = self.model_selector.currentText()
         registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager)
@@ -401,6 +472,15 @@ class MainWindow(QMainWindow):
         self.task_manager.request_stop(self.current_task.id)
         self.status_label.setText("Stopped")
         self.task_manager.emergency_stop.stop()
+
+    def closeEvent(self, event) -> None:
+        # Model discovery runs off the UI thread and has a bounded network timeout.
+        # Wait briefly so closing during startup cannot destroy a running QThread.
+        for worker in tuple(self._model_workers):
+            if worker.isRunning():
+                worker.requestInterruption()
+                worker.wait(6500)
+        super().closeEvent(event)
 
     def show_settings(self) -> None:
         window = SettingsWindow(self.config)

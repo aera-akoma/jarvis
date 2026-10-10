@@ -9,6 +9,7 @@ venv/
 # Build artifacts
 build/
 dist/
+dist_*/
 *.spec
 !jarvis.spec
 
