@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 import json
 import threading
@@ -33,6 +34,7 @@ from app.core.session_manager import SessionManager
 from app.memory.memory_manager import MemoryManager
 from app.memory.memory_manager import MemoryCandidateExtractor
 from app.opencode.client import OpenCodeClient
+from app.providers import default_preset, get_preset
 from app.search.search_manager import SearchManager
 from app.tasks import TaskManager
 from app.tooling import ToolRegistry
@@ -200,7 +202,7 @@ class MainWindow(QMainWindow):
         self.voice_output_enabled = configured_voice_output and self.voice_manager.text_to_speech_available()
         self.speech_input_worker: SpeechInputWorker | None = None
         self.speech_output_worker: SpeechOutputWorker | None = None
-        self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
+        self.runtime = self._build_runtime()
         self._model_workers: list[ModelListWorker] = []
         self._model_load_generation = 0
         self._models_loading = False
@@ -224,6 +226,25 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_history()
         self.apply_theme(self.config.theme)
+
+    def _build_runtime(self) -> OpenCodeClient:
+        provider_id = self.settings_manager.get("provider_id", "custom") or "custom"
+        preset = get_preset(provider_id) or default_preset()
+        base_url = self.settings_manager.get("openai_base_url") or preset.base_url or None
+        return OpenCodeClient(base_url=base_url, credential_name=preset.credential_name)
+
+    def _configured_models(self) -> list[str]:
+        """Primary model followed by the user's ordered fallback models."""
+        models: list[str] = []
+        primary = (self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()).strip()
+        if primary:
+            models.append(primary)
+        fallback = self.settings_manager.get("model_fallback", "") or ""
+        for chunk in re.split(r"[,\n]", fallback):
+            model = chunk.strip()
+            if model and model not in models:
+                models.append(model)
+        return models
 
     def _populate_model_selector(self) -> None:
         self._model_load_generation += 1
@@ -253,6 +274,25 @@ class MainWindow(QMainWindow):
         self._model_connection_error = error_message
         self.model_selector.clear()
         if not models:
+            # If the provider does not expose a /models catalog, still let the
+            # user use the models they configured rather than blocking sending.
+            # Only do this when the provider actually reported an error, so an
+            # empty catalog with no diagnostic still surfaces as a warning.
+            configured = []
+            if error_message:
+                auth_failure = any(marker in error_message for marker in ("401", "403", "Cloudflare error 1010"))
+                if not auth_failure:
+                    configured = self._configured_models()
+            if configured:
+                self.model_selector.addItems(configured)
+                self.model_selector.setEnabled(True)
+                self.model_selector.setToolTip(
+                    error_message or "The provider catalog could not be listed; using your configured models."
+                )
+                self.status_label.setText("Catalog not listed — using configured models")
+                if self.default_model_name in configured:
+                    self.model_selector.setCurrentText(self.default_model_name)
+                return
             if "Cloudflare error 1010" in error_message:
                 failure_label = "Provider edge blocked the request"
             elif "HTTP 403" in error_message:
@@ -515,7 +555,9 @@ class MainWindow(QMainWindow):
         if attachments:
             display_text += "\n\n" + "\n".join(f"[Attached file: {item['name']}]" for item in attachments)
         registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager)
-        self.agent_loop = AgentLoop(registry=registry, model_adapter=OpenAICompatibleModelAdapter(registry, self.runtime, model_name), action_logger=self._log_action, workflow_manager=self.workflow_manager)
+        fallback_models = [model for model in self._configured_models() if model != model_name]
+        model_adapter = OpenAICompatibleModelAdapter(registry, self.runtime, model_name, fallback_models=fallback_models)
+        self.agent_loop = AgentLoop(registry=registry, model_adapter=model_adapter, action_logger=self._log_action, workflow_manager=self.workflow_manager)
         self.current_task = self.task_manager.create_task(f"Chat: {request_text[:32]}", project_path=self.config.data_dir, selected_model=model_name)
         self.task_manager.start(self.current_task.id)
         self.status_label.setText("Running")
@@ -564,6 +606,9 @@ class MainWindow(QMainWindow):
 
     def _agent_finished(self, result: dict) -> None:
         response = result.get("summary") or "Jarvis did not return a response."
+        fallback_note = getattr(getattr(self.agent_loop, "model_adapter", None), "last_fallback_note", None)
+        if fallback_note and result.get("success"):
+            response = f"{response}\n\n[{fallback_note}]"
         if result.get("cancelled"):
             self.task_manager.get_task(self.current_task.id).status = "cancelled"
         elif result.get("success"):
@@ -636,7 +681,7 @@ class MainWindow(QMainWindow):
         window.data_restored.connect(self._data_restored)
         window.exec()
         self.default_model_name = self.settings_manager.get("default_model", self.config.default_model()) or self.config.default_model()
-        self.runtime = OpenCodeClient(base_url=self.settings_manager.get("openai_base_url"))
+        self.runtime = self._build_runtime()
         self._populate_model_selector()
 
     def _data_restored(self, result: dict) -> None:

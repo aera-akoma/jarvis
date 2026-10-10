@@ -95,9 +95,10 @@ def test_settings_connection_test_runs_catalog_check_in_background(tmp_path, mon
             return None
 
     class FakeClient:
-        def __init__(self, *, base_url, api_key):
+        def __init__(self, *, base_url, api_key, credential_name="OpenAI"):
             calls["base_url"] = base_url
             calls["api_key"] = api_key
+            calls["credential_name"] = credential_name
             self.last_error = None
 
         def discover_models(self):
@@ -216,7 +217,7 @@ def test_blank_key_save_preserves_existing_credential(tmp_path, monkeypatch):
     app.processEvents()
 
 
-def test_nonempty_key_save_replaces_all_saved_entries(tmp_path, monkeypatch):
+def test_nonempty_key_save_updates_only_the_selected_provider(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication, QMessageBox
     from app.ui.settings_window import SettingsWindow
 
@@ -229,8 +230,8 @@ def test_nonempty_key_save_replaces_all_saved_entries(tmp_path, monkeypatch):
         def get(self, name):
             return self.entries.get(name)
 
-        def replace_all(self, name, value):
-            self.entries = {name: value}
+        def set(self, name, value):
+            self.entries[name] = value
 
     class NoopStartupManager:
         def __init__(self):
@@ -255,7 +256,61 @@ def test_nonempty_key_save_replaces_all_saved_entries(tmp_path, monkeypatch):
 
     window.save_settings()
 
-    assert window.credentials.entries == {"OpenAI": "new-test-secret"}
+    # The default/custom provider stores under the legacy "OpenAI" name; other
+    # providers keep their own keys untouched.
+    assert window.credentials.entries == {"OpenAI": "new-test-secret", "Other": "another-test-secret"}
+    app.processEvents()
+
+
+def test_settings_saves_key_under_selected_provider(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from app.ui.settings_window import SettingsWindow
+
+    class Store:
+        storage_error = None
+
+        def __init__(self):
+            self.entries = {}
+
+        def get(self, name):
+            return self.entries.get(name)
+
+        def set(self, name, value):
+            self.entries[name] = value
+
+        def delete(self, name):
+            self.entries.pop(name, None)
+
+    class NoopStartupManager:
+        def __init__(self):
+            pass
+
+        def is_enabled(self):
+            return False
+
+        def enable_startup(self):
+            pass
+
+        def disable_startup(self):
+            pass
+
+    monkeypatch.setattr("app.ui.settings_window.CredentialStore", Store)
+    monkeypatch.setattr("app.ui.settings_window.StartupManager", NoopStartupManager)
+    monkeypatch.setattr(QMessageBox, "information", lambda *_args, **_kwargs: None)
+    app = QApplication.instance() or QApplication([])
+    window = SettingsWindow(AppConfig(data_dir=str(tmp_path)))
+
+    index = window.provider_input.findData("groq")
+    assert index >= 0
+    window.provider_input.setCurrentIndex(index)
+    assert window.base_url_input.text() == "https://api.groq.com/openai/v1"
+    window.api_key_input.setText("groq-test-key")
+
+    window.save_settings()
+
+    assert window.credentials.entries == {"groq": "groq-test-key"}
+    assert window.settings.get("provider_id") == "groq"
+    assert window.settings.get("openai_base_url") == "https://api.groq.com/openai/v1"
     app.processEvents()
 
 

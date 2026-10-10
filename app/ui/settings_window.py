@@ -4,6 +4,7 @@ import os
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -23,18 +24,21 @@ from app.security.credentials import CredentialStore
 from app.startup import StartupManager
 from app.export_import.import_export import ExportImportManager
 from app.opencode.client import OpenCodeClient
+from app.providers import default_preset, get_preset, preset_order
+from app.ui.login_dialog import LoginDialog
 
 
 class ConnectionTestWorker(QThread):
     result_ready = Signal(object)
 
-    def __init__(self, base_url: str, api_key: str | None) -> None:
+    def __init__(self, base_url: str, api_key: str | None, credential_name: str = "OpenAI") -> None:
         super().__init__()
         self.base_url = base_url
         self.api_key = api_key
+        self.credential_name = credential_name
 
     def run(self) -> None:
-        client = OpenCodeClient(base_url=self.base_url, api_key=self.api_key)
+        client = OpenCodeClient(base_url=self.base_url, api_key=self.api_key, credential_name=self.credential_name)
         models = client.discover_models()
         self.result_ready.emit({"models": models, "error": client.last_error})
 
@@ -42,14 +46,15 @@ class ConnectionTestWorker(QThread):
 class ModelAccessTestWorker(QThread):
     result_ready = Signal(object)
 
-    def __init__(self, base_url: str, api_key: str | None, model: str) -> None:
+    def __init__(self, base_url: str, api_key: str | None, model: str, credential_name: str = "OpenAI") -> None:
         super().__init__()
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
+        self.credential_name = credential_name
 
     def run(self) -> None:
-        client = OpenCodeClient(base_url=self.base_url, api_key=self.api_key)
+        client = OpenCodeClient(base_url=self.base_url, api_key=self.api_key, credential_name=self.credential_name)
         result = client.probe_model_access(self.model)
         result["model"] = self.model
         self.result_ready.emit(result)
@@ -63,11 +68,17 @@ class SettingsWindow(QDialog):
         self.config = config or AppConfig()
         self.settings = SettingsManager(self.config)
         self.credentials = CredentialStore()
+        stored_provider_id = self.settings.get("provider_id") or ""
+        # Installs upgraded from before provider presets existed have no
+        # provider_id and keep their key under the legacy "OpenAI" name, so the
+        # default resolves to "custom" (credential_name "OpenAI") and their
+        # working setup is preserved until they explicitly choose a preset.
+        self._initial_preset = get_preset(stored_provider_id) or default_preset()
         self._key_status_text = self._get_key_status()
         self.startup_manager = StartupManager()
         self.export_import = ExportImportManager(database_path=str(self.config.database_path), root=str(self.config.data_dir_path / "exports"))
         self.setWindowTitle("Jarvis Settings")
-        self.resize(480, 360)
+        self.resize(520, 560)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -76,7 +87,15 @@ class SettingsWindow(QDialog):
 
         self.theme_input = QLineEdit(self.settings.get("theme", self.config.theme) or self.config.theme)
         self.model_input = QLineEdit(self.settings.get("default_model", self.config.default_model()) or self.config.default_model())
+        self.fallback_input = QLineEdit(self.settings.get("model_fallback", "") or "")
+        self.fallback_input.setPlaceholderText("Optional: comma-separated models to try when one hits its quota")
         self.base_url_input = QLineEdit(self.settings.get("openai_base_url") or os.getenv("JARVIS_OPENAI_BASE_URL") or os.getenv("OPENCODE_BASE_URL") or "")
+
+        self.provider_input = QComboBox()
+        for preset in preset_order():
+            self.provider_input.addItem(preset.label, preset.id)
+        self._select_provider(self._initial_preset.id)
+
         self.api_key_input = QLineEdit()
         self.api_key_input.setPlaceholderText(
             "Leave blank to keep the saved key" if self._key_status_text.startswith("A key is saved") else "Enter API key"
@@ -86,26 +105,24 @@ class SettingsWindow(QDialog):
         self.startup_checkbox.setChecked(self.startup_manager.is_enabled())
 
         form.addRow("Theme", self.theme_input)
+        form.addRow("Provider", self.provider_input)
         form.addRow("Default model", self.model_input)
+        form.addRow("Fallback models", self.fallback_input)
         form.addRow("Runtime URL", self.base_url_input)
-        self.base_url_input.setToolTip(
-            "OpenCode API key from /connect: https://opencode.ai/zen/v1\n"
-            "Console service-account key: https://opencode.ai/inference/openai/v1"
-        )
-        base_url_hint = QLabel(
-            "Both routes are OpenCode but use different keys. If you got your key from the OpenCode "
-            "TUI's /connect command, use https://opencode.ai/zen/v1. If it is a Console service-account "
-            "key (Console > Keys), use https://opencode.ai/inference/openai/v1. Jarvis never switches this silently."
-        )
-        base_url_hint.setWordWrap(True)
-        form.addRow("", base_url_hint)
+        self.provider_hint = QLabel("")
+        self.provider_hint.setWordWrap(True)
+        form.addRow("", self.provider_hint)
         form.addRow("API key", self.api_key_input)
-        self.test_connection_button = QPushButton("Test connection")
+        self.test_connection_button = QPushButton("Test connection (catalog only)")
         self.test_connection_button.clicked.connect(self.test_connection)
-        form.addRow("Provider", self.test_connection_button)
+        form.addRow("", self.test_connection_button)
         self.test_access_button = QPushButton("Test model access (sends one tiny request)")
         self.test_access_button.clicked.connect(self.test_model_access)
         form.addRow("", self.test_access_button)
+        self.login_button = QPushButton("Sign in with browser…")
+        self.login_button.setToolTip("Sign in through the provider's own page instead of pasting a key.")
+        self.login_button.clicked.connect(self.open_login_dialog)
+        form.addRow("", self.login_button)
         layout.addLayout(form)
         self.connection_status = QLabel("Test connection checks the public model catalog only. Use Test model access to confirm the saved key can actually reach a model.")
         self.connection_status.setWordWrap(True)
@@ -141,13 +158,45 @@ class SettingsWindow(QDialog):
         self.credential_status.setWordWrap(True)
         layout.addWidget(self.credential_status)
 
-    def _get_key_status(self) -> str:
+        self._update_provider_fields(self._initial_preset, initial=True)
+        self.provider_input.currentIndexChanged.connect(lambda _index: self._update_provider_fields(self._selected_preset()))
+
+    def _select_provider(self, provider_id: str) -> None:
+        index = self.provider_input.findData(provider_id)
+        self.provider_input.setCurrentIndex(index if index >= 0 else 0)
+
+    def _selected_preset(self):
+        return get_preset(self.provider_input.currentData()) or default_preset()
+
+    def _update_provider_fields(self, preset, *, initial: bool = False) -> None:
+        if preset.base_url and (not initial or not self.base_url_input.text().strip()):
+            self.base_url_input.setText(preset.base_url)
+        notes = [preset.note] if preset.note else []
+        if preset.docs_url:
+            notes.append(f"Get a key: {preset.docs_url}")
+        if preset.keyless:
+            notes.append("A key is optional for this provider.")
+        if preset.in_opencode:
+            notes.append("OpenCode also supports this provider.")
+        notes.append("Jarvis keeps a separate key per provider.")
+        self.provider_hint.setText(" ".join(notes))
+        self._refresh_key_status(preset)
+
+    def _refresh_key_status(self, preset) -> None:
+        text = self._get_key_status(preset.credential_name)
+        self.credential_status.setText(text)
+        self.api_key_input.setPlaceholderText(
+            "Leave blank to keep the saved key" if text.startswith("A key is saved") else "Enter API key"
+        )
+
+    def _get_key_status(self, credential_name: str | None = None) -> str:
+        credential_name = credential_name or self._initial_preset.credential_name
         if self.credentials.storage_error:
             return f"Secure credential storage is unavailable: {self.credentials.storage_error}"
         try:
-            if self.credentials.get("OpenAI"):
+            if self.credentials.get(credential_name):
                 return "A key is saved securely with Windows DPAPI (hidden). This confirms local storage only; provider acceptance is checked when you send a message. Leave blank to keep it."
-            return "No API key is saved. Enter the provider key above; it will be stored securely with Windows DPAPI."
+            return "No API key is saved for this provider. Enter the provider key above; it will be stored securely with Windows DPAPI."
         except (OSError, RuntimeError) as exc:
             return f"Could not check secure credential storage: {exc}"
 
@@ -165,7 +214,7 @@ class SettingsWindow(QDialog):
         api_key = self.api_key_input.text().strip() or None
         self.connection_status.setText("Testing catalog GET in the background…")
         self.test_connection_button.setEnabled(False)
-        worker = ConnectionTestWorker(runtime_url, api_key)
+        worker = ConnectionTestWorker(runtime_url, api_key, self._selected_preset().credential_name)
         self._connection_worker = worker
         worker.result_ready.connect(self._connection_test_finished)
         worker.finished.connect(self._connection_worker_finished)
@@ -208,7 +257,7 @@ class SettingsWindow(QDialog):
         api_key = self.api_key_input.text().strip() or None
         self.access_status.setText(f"Testing access to {model!r} with one small request…")
         self.test_access_button.setEnabled(False)
-        worker = ModelAccessTestWorker(runtime_url, api_key, model)
+        worker = ModelAccessTestWorker(runtime_url, api_key, model, self._selected_preset().credential_name)
         self._access_worker = worker
         worker.result_ready.connect(self._access_test_finished)
         worker.finished.connect(self._access_worker_finished)
@@ -232,6 +281,25 @@ class SettingsWindow(QDialog):
             self._access_worker = None
         if worker is not None:
             worker.deleteLater()
+
+    def open_login_dialog(self) -> None:
+        dialog = LoginDialog(self.credentials, self)
+        dialog.signed_in.connect(self._on_signed_in)
+        dialog.exec()
+
+    def _on_signed_in(self, credential_name: str, provider_id: str) -> None:
+        # If the signed-in provider maps to a preset, select it so the token is
+        # actually used. Azure OpenAI / custom endpoints stay on the current
+        # provider; the token is still saved under its own credential name.
+        preset = get_preset(provider_id)
+        if preset is not None:
+            self._select_provider(preset.id)
+            self._update_provider_fields(preset)
+        self._refresh_key_status(self._selected_preset())
+        self.connection_status.setText(
+            f"Signed in. The browser token is stored under {credential_name!r}; "
+            "use Test model access to confirm it reaches a model."
+        )
 
     def closeEvent(self, event) -> None:
         if self._connection_worker is not None and self._connection_worker.isRunning():
@@ -319,30 +387,33 @@ class SettingsWindow(QDialog):
         QMessageBox.information(self, "Restore complete", f"Imported data using {strategy}.\n\n" + "\n".join(f"{name.title()}: {count}" for name, count in counts.items()))
 
     def save_settings(self) -> None:
+        preset = self._selected_preset()
+        self.settings.set("provider_id", preset.id)
         self.settings.set("theme", self.theme_input.text().strip() or self.config.theme)
         self.settings.set("default_model", self.model_input.text().strip() or self.config.default_model())
+        self.settings.set("model_fallback", self._normalize_fallback(self.fallback_input.text()))
 
         runtime_url = self.base_url_input.text().strip()
-        if runtime_url:
-            self.settings.set("openai_base_url", runtime_url)
-            os.environ["JARVIS_OPENAI_BASE_URL"] = runtime_url
-        elif os.getenv("JARVIS_OPENAI_BASE_URL"):
-            self.settings.set("openai_base_url", "")
-            os.environ.pop("JARVIS_OPENAI_BASE_URL", None)
+        # Persist to settings only. Mutating the process environment here would
+        # leak the choice into other code and tests.
+        self.settings.set("openai_base_url", runtime_url)
 
         new_api_key = self.api_key_input.text().strip()
         if new_api_key:
             try:
-                self.credentials.replace_all("OpenAI", new_api_key)
+                # Per-provider credentials: saving a Groq key never overwrites
+                # the OpenCode key (each provider has its own DPAPI entry).
+                self.credentials.set(preset.credential_name, new_api_key)
             except (OSError, RuntimeError) as exc:
                 QMessageBox.critical(self, "Secure storage unavailable", str(exc))
                 return
             self.credential_status.setText(
-                "The new key replaced the previously saved key. Exactly one key is kept in Jarvis secure storage."
+                f"The key for {preset.label} was saved with Windows DPAPI. Other providers keep their own keys."
             )
             QMessageBox.information(
                 self, "Saved securely",
-                "The new API key replaced all previously stored keys and was saved with Windows DPAPI. Jarvis checks whether the provider accepts it when you send a message. For security, the field stays blank when you reopen Settings.",
+                f"The API key for {preset.label} was saved with Windows DPAPI. Jarvis checks whether the provider "
+                "accepts it when you send a message. For security, the field stays blank when you reopen Settings.",
             )
 
         if self.startup_checkbox.isChecked():
@@ -351,14 +422,24 @@ class SettingsWindow(QDialog):
             self.startup_manager.disable_startup()
         self.close()
 
+    @staticmethod
+    def _normalize_fallback(text: str) -> str:
+        models = [model.strip() for chunk in (text or "").splitlines() for model in chunk.split(",")]
+        seen: list[str] = []
+        for model in models:
+            if model and model not in seen:
+                seen.append(model)
+        return ", ".join(seen)
+
     def clear_key(self) -> None:
+        preset = self._selected_preset()
         try:
-            self.credentials.delete("OpenAI")
+            self.credentials.delete(preset.credential_name)
         except (OSError, RuntimeError) as exc:
             QMessageBox.critical(self, "Could not clear credential", str(exc))
             return
         self.api_key_input.clear()
         self.credential_status.setText(
-            "No API key is saved. Enter the provider key above; it will be stored securely with Windows DPAPI."
+            "No API key is saved for this provider. Enter the provider key above; it will be stored securely with Windows DPAPI."
         )
-        QMessageBox.information(self, "Removed", "The stored API key has been cleared.")
+        QMessageBox.information(self, "Removed", f"The stored key for {preset.label} has been cleared.")

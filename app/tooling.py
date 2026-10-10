@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import threading
@@ -9,6 +10,10 @@ from typing import Any, Callable
 
 from app.computer.windows import WindowsController
 from app.search.search_manager import SearchManager
+from app.tool_loader import discover_skills
+from app.undo import UndoManager
+
+logger = logging.getLogger("jarvis.tools")
 
 
 @dataclass
@@ -18,6 +23,11 @@ class ToolDefinition:
     permission_level: str = "safe"
     parameters: dict[str, str] = field(default_factory=dict)
     handler: Callable[..., dict[str, Any]] | None = None
+    # Optional undo support: ``undo_capture`` snapshots the "before" state from
+    # the parameters before the handler runs; ``undo_restore`` reverses it.
+    undo_capture: Callable[[dict[str, Any]], Any] | None = None
+    undo_label: str = ""
+    undo_restore: Callable[[dict[str, Any], Any], Any] | None = None
 
 
 class ToolRegistry:
@@ -27,10 +37,12 @@ class ToolRegistry:
         self.desktop = desktop_controller or WindowsController()
         self.workflow_manager = workflow_manager
         self.search_manager = search_manager
+        self.undo_manager = UndoManager()
         self._active_process: subprocess.Popen[str] | None = None
         self._process_lock = threading.Lock()
         self._cancel_requested = threading.Event()
         self._register_default_tools()
+        self._register_skills()
 
     def cancel_running(self) -> None:
         self._cancel_requested.set()
@@ -53,13 +65,17 @@ class ToolRegistry:
     def _register_default_tools(self) -> None:
         definitions = [
             ToolDefinition("read_file", "Read a text file from disk.", "safe", {"path": "file path"}, self._read_file),
-            ToolDefinition("write_file", "Write or overwrite a text file.", "moderate", {"path": "file path", "content": "file contents"}, self._write_file),
-            ToolDefinition("create_file", "Create a new file with content.", "moderate", {"path": "file path", "content": "file contents"}, self._create_file),
-            ToolDefinition("create_directory", "Create a directory tree.", "moderate", {"path": "directory path"}, self._create_directory),
+            ToolDefinition("write_file", "Write or overwrite a text file.", "moderate", {"path": "file path", "content": "file contents"}, self._write_file,
+                           undo_capture=self._capture_file_state, undo_label="restore the previous file content", undo_restore=self._restore_file_state),
+            ToolDefinition("create_file", "Create a new file with content.", "moderate", {"path": "file path", "content": "file contents"}, self._create_file,
+                           undo_capture=self._capture_missing_path, undo_label="delete the created file", undo_restore=self._remove_created_file),
+            ToolDefinition("create_directory", "Create a directory tree.", "moderate", {"path": "directory path"}, self._create_directory,
+                           undo_capture=self._capture_missing_path, undo_label="remove the created directory", undo_restore=self._remove_created_directory),
             ToolDefinition("list_directory", "List files in a directory.", "safe", {"path": "directory path"}, self._list_directory),
             ToolDefinition("search_files", "Search for files under a directory.", "safe", {"path": "directory path", "pattern": "file pattern"}, self._search_files),
             ToolDefinition("open_application", "Open an application or document on Windows.", "safe", {"path": "application or document path"}, self._open_application),
             ToolDefinition("run_powershell", "Run a PowerShell command.", "dangerous", {"command": "PowerShell command"}, self._run_powershell),
+            ToolDefinition("undo", "Undo Jarvis's most recent reversible action (for example a file write, a created file or directory, or a window move). Say 'undo' and Jarvis reverses what it last changed.", "moderate", {}, self._undo),
         ]
         for definition in definitions:
             self.register(definition)
@@ -102,8 +118,6 @@ class ToolRegistry:
             ("hotkey", "Press a key combination, for example Ctrl+Shift+S.", "dangerous", {"keys": "keys joined with +"}, self.desktop.hotkey),
             ("get_windows", "List visible desktop windows and their bounds.", "safe", {}, self.desktop.get_windows),
             ("focus_window", "Bring the uniquely matching visible window to the foreground.", "safe", {"title": "visible window title or unique substring"}, self.desktop.focus_window),
-            ("move_window", "Move a visible window while preserving its size.", "moderate", {"title": "visible window title", "x": "new horizontal coordinate", "y": "new vertical coordinate"}, self.desktop.move_window),
-            ("resize_window", "Resize a visible window while preserving its position.", "moderate", {"title": "visible window title", "width": "new width in pixels", "height": "new height in pixels"}, self.desktop.resize_window),
             ("close_application", "Request that a visible application window close.", "dangerous", {"title": "visible window title"}, self.desktop.close_application),
             ("open_browser", "Open a visible Jarvis-managed browser at an HTTP(S) URL.", "moderate", {"url": "HTTP or HTTPS URL to open"}, self.desktop.open_browser),
             ("navigate_browser", "Navigate the active Jarvis browser tab to an HTTP(S) URL.", "moderate", {"url": "HTTP or HTTPS URL to open"}, self.desktop.navigate_browser),
@@ -115,6 +129,22 @@ class ToolRegistry:
         ]
         for name, description, permission, parameters, handler in definitions:
             self.register(ToolDefinition(name, description, permission, parameters, handler))
+        self.register(ToolDefinition("move_window", "Move a visible window while preserving its size.", "moderate",
+                                {"title": "visible window title", "x": "new horizontal coordinate", "y": "new vertical coordinate"},
+                                self.desktop.move_window,
+                                undo_capture=self._capture_window_geometry, undo_label="restore the window position", undo_restore=self._restore_window_geometry))
+        self.register(ToolDefinition("resize_window", "Resize a visible window while preserving its position.", "moderate",
+                                {"title": "visible window title", "width": "new width in pixels", "height": "new height in pixels"},
+                                self.desktop.resize_window,
+                                undo_capture=self._capture_window_geometry, undo_label="restore the window size", undo_restore=self._restore_window_geometry))
+
+
+    def _register_skills(self) -> None:
+        for tool in discover_skills():
+            if tool.name in self.tools:
+                logger.warning("skill %s collides with a built-in tool and was skipped", tool.name)
+                continue
+            self.register(tool)
 
     def register(self, tool: ToolDefinition) -> None:
         self.tools[tool.name] = tool
@@ -149,6 +179,12 @@ class ToolRegistry:
             payload["path"] = target
         if tool.handler is None:
             return {"ok": False, "success": False, "error": f"Tool {name} has no handler"}
+        captured: Any = None
+        if tool.undo_capture is not None:
+            try:
+                captured = tool.undo_capture(payload)
+            except Exception as exc:  # noqa: BLE001 - undo capture must never break the action
+                logger.warning("undo capture failed for tool %s: %s", name, exc)
         try:
             result = tool.handler(**payload)
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
@@ -156,6 +192,11 @@ class ToolRegistry:
         if isinstance(result, dict):
             result.setdefault("success", result.get("ok", False))
             result.setdefault("ok", result.get("success", False))
+            if result.get("ok") and tool.undo_restore is not None and captured is not None:
+                params_snapshot = dict(payload)
+                restore = tool.undo_restore
+                label = tool.undo_label or f"undo {name}"
+                self.undo_manager.push(label, lambda: restore(params_snapshot, captured))
             return result
         return {"ok": True, "success": True, "result": result}
 
@@ -234,3 +275,69 @@ class ToolRegistry:
             with self._process_lock:
                 if self._active_process is process:
                     self._active_process = None
+
+    def _capture_file_state(self, params: dict[str, Any]) -> tuple[str, str | None]:
+        path = Path(str(params.get("path") or ""))
+        if path.is_file():
+            return ("existed", path.read_text(encoding="utf-8"))
+        return ("missing", None)
+
+    def _restore_file_state(self, params: dict[str, Any], captured: tuple[str, str | None]) -> None:
+        path = Path(str(params.get("path") or ""))
+        state, content = captured
+        if state == "existed":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content or "", encoding="utf-8")
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _capture_missing_path(self, params: dict[str, Any]) -> bool:
+        return Path(str(params.get("path") or "")).exists()
+
+    def _remove_created_file(self, params: dict[str, Any], existed: bool) -> None:
+        if existed:
+            return
+        try:
+            Path(str(params.get("path") or "")).unlink()
+        except FileNotFoundError:
+            pass
+
+    def _remove_created_directory(self, params: dict[str, Any], existed: bool) -> None:
+        if existed:
+            return
+        directory = Path(str(params.get("path") or ""))
+        try:
+            directory.rmdir()
+        except OSError as exc:
+            raise OSError(f"Created directory is no longer empty: {directory}") from exc
+
+    def _capture_window_geometry(self, params: dict[str, Any]) -> dict[str, int] | None:
+        title = str(params.get("title") or "").strip()
+        if not title:
+            return None
+        windows = self.desktop.api.get_windows() or []
+        matches = [w for w in windows if title.casefold() in str(w.get("title", "")).casefold()]
+        if len(matches) != 1:
+            return None
+        return {key: int(matches[0][key]) for key in ("x", "y", "width", "height")}
+
+    def _restore_window_geometry(self, params: dict[str, Any], geometry: dict[str, int]) -> None:
+        if not geometry:
+            return
+        self.desktop.api.set_window_bounds(str(params.get("title") or ""),
+                                       geometry["x"], geometry["y"],
+                                       geometry["width"], geometry["height"])
+
+    def _undo(self) -> dict[str, Any]:
+        entry = self.undo_manager.pop()
+        if entry is None:
+            return {"ok": False, "success": False, "error": "Nothing to undo."}
+        try:
+            entry.undo()
+        except Exception as exc:  # noqa: BLE001 - the failure must be reported to the model
+            self.undo_manager.push(entry.label, entry.undo)
+            return {"ok": False, "success": False, "error": f"Undo failed for {entry.label}: {exc}"}
+        return {"ok": True, "success": True, "undone": entry.label}

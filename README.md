@@ -54,7 +54,7 @@ This starts the desktop app from the project source tree.
 
 ## Configure a model provider
 
-Open **Settings** from Jarvis and enter the provider's API base URL and API key. The key is stored with Windows DPAPI. Entering a non-empty key replaces the saved credential store with exactly that one key; leaving the box empty keeps the saved key. The key box intentionally stays empty after saving, and the status below it confirms whether a key is stored.
+Open **Settings** from Jarvis, choose a **Provider** preset, and enter that provider's API key. The preset fills the Runtime URL (still editable). Each provider's key is stored **separately** with Windows DPAPI, so adding a Groq key never overwrites your OpenCode key. Leaving the key box empty keeps the saved key for the selected provider; **Clear key** removes only the selected provider's key. The key box intentionally stays empty after saving, and the status below it confirms whether a key is stored for that provider.
 
 Jarvis currently uses the OpenAI-compatible Chat Completions API. For an OpenCode Console service-account key, set Runtime URL to `https://opencode.ai/inference/openai/v1`; Jarvis fetches the public model catalog from `https://opencode.ai/inference/v1/models` and sends chat requests to `https://opencode.ai/inference/openai/v1/chat/completions`. The Console catalog contains model IDs but does not identify each model's API family, so Jarvis matches those IDs against OpenCode's documented Console model-family table. This checks protocol compatibility only; it does not prove that the configured account can use a model. The **Test connection** action checks the catalog in a background worker and does not send a chat request or validate the saved key.
 
@@ -69,6 +69,33 @@ Provider errors show whether the catalog GET or Chat Completions POST failed, al
 **Free-tier policy.** OpenCode restricts its free models to the official client: a request from any third-party tool is refused with `HTTP 403` `FreeTierError: OpenCode's free tier can only be used from within OpenCode`. This is a server-side policy, not a Jarvis bug, and Jarvis will not impersonate the official client to avoid it. Free models therefore cannot be used through Jarvis; choose a paid model, which needs Console credits or an OpenCode Go/Go Plus subscription. A request with a missing, empty, or unrecognised key is also treated as free tier, so this error can appear when the saved key has been rotated or revoked and Jarvis still holds the old one — re-enter the current key in Settings and press **Save** (the key box stays blank on purpose, so leaving it blank keeps the *old* key).
 
 **Test model access.** The public catalog can succeed even when the account cannot use a model, so the **Test model access** button in Settings sends one tiny Chat Completions request with the saved key and the configured model and reports the provider's exact response (including any `error.type`). **Test connection** only checks the catalog. Use **Test model access** to confirm the saved key really reaches a model.
+
+## Free providers and automatic model failover
+
+Jarvis supports any OpenAI Chat Completions-compatible provider. The built-in **Provider** presets cover the full "awesome-free-llm-apis" list — Groq, Google Gemini, Mistral, Z AI (Zhipu), Cohere, Aion Labs, OpenRouter, NVIDIA NIM, Hugging Face Router, ModelScope, Kilo Code, LLM7.io, OVHcloud AI Endpoints, Ollama Cloud, SiliconFlow, Cloudflare Workers AI — plus Cerebras, Together AI, GitHub Models, the two OpenCode routes (Zen `/connect` key and Console service-account key) and a **Custom** option that keeps your existing setup. Providers that OpenCode's own catalog also supports (14 of the 16 free ones) are marked in the Settings hint. The Runtime URL remains editable, so a changed endpoint can always be corrected. Each provider stores its own key (see above). Two presets need an edit before use: Cloudflare (`{account_id}` must be replaced with your account id) and Cohere (uses the OpenAI-compatible `/compatibility/v1` endpoint).
+
+If a provider does not expose a `/models` catalog, Jarvis still lets you send using the models you configured instead of blocking the chat window.
+
+### Browser sign-in (OAuth)
+
+Some providers accept a browser sign-in instead of a pasted key. **Sign in with browser…** in Settings opens the sign-in dialog, which currently supports:
+
+- **Microsoft Entra ID (Azure OpenAI / AI Foundry)** — device code flow (RFC 8628): Jarvis shows a code and opens the provider page; you approve there; the token is stored securely. You first need a public-client app and the tenant id from the Microsoft developer console.
+- **Google (Gemini)** — installed-app authorization code + PKCE on a loopback redirect, using a Desktop OAuth client you create.
+
+Jarvis implements only the standard OAuth flows (device authorization grant and RFC 7636 PKCE) and never performs a private or undocumented token exchange, so it does not impersonate GitHub Copilot's internal client or any other official client. Tokens are written straight to the Windows DPAPI credential store and are never displayed, logged, or backed up. A stored token expires like the provider's own token; sign in again (or use an API key) once it stops being accepted. Tests use a fake transport only — no live sign-in is ever performed by the test suite.
+
+**Fallback models.** The **Fallback models** field in Settings takes a comma-separated, ordered list. When the selected model returns a **retryable** error — rate limit or quota (`429`), billing/insufficient-quota, resource-exhausted, capacity/overloaded, or OpenCode's `FreeTierError` — Jarvis automatically retries the request on the next model in the list and reports which model answered. **Non-retryable** errors (invalid key, unknown model, malformed request) are surfaced immediately instead of being retried. The primary model is always tried first on each new request, so a quota that resets is picked up automatically.
+
+Note: free models hosted by OpenCode itself remain blocked to third-party clients by OpenCode's server policy (see **Free-tier policy** above). Use the upstream free providers directly instead.
+
+## Capabilities ported from Mark-LV
+
+Three assistant capabilities are adapted from Mark-LV's design (see **Credits and licensing**):
+
+- **UI-issued confirmations.** Risky actions (`moderate`, `dangerous`) are approved by a real permission dialog in the UI thread; the model cannot grant its own approval because the confirmation state lives in the interface, not in the tool output.
+- **Undo.** Jarvis keeps one shared undo stack per session. State-changing tools (`write_file`, `create_file`, `create_directory`, `move_window`, `resize_window`) snapshot their "before" state when they run, and the model can reverse its most recent change with the `undo` tool ("undo that"). Undoing a file write restores the previous content; undoing a created file/directory removes it; undoing a window move/resize restores the prior geometry. A failed undo is kept on the stack so it can be retried, and `undo` itself requires the same `moderate` approval as the actions it reverses.
+- **Self-describing skills.** Any `*.py` module in `app/skills/` that declares a `TOOL` dict (name, description, permission level, handler) is auto-discovered and registered at startup — the registry never needs a code change to pick up a new skill. Modules with invalid or missing declarations are logged and skipped instead of breaking startup. Two example skills ship with Jarvis: `disk_free` and `uptime`.
 
 ## Run tests
 
@@ -95,8 +122,13 @@ The standalone executable bundles Python dependencies, not a browser installatio
 ## Security notes
 
 - API keys are stored in a secure OS credential flow rather than plaintext in app state.
+- OAuth tokens from browser sign-in are stored in the same DPAPI store as JSON bundles; they are never logged or included in backups, and the UI never displays a token.
 - Local data is handled with SQLite and stays on the machine.
 - The app is designed for local-first use instead of browser-only execution.
+
+## Credits and licensing
+
+Jarvis draws design inspiration from existing open-source desktop agents; in particular [FatihMakes/Mark-LV](https://github.com/FatihMakes/Mark-LV) (Python, PyQt6) informs the assistant-concepts work (model fallback, UI-issued confirmations, undo, self-describing skills). Mark-LV is released under **CC BY-NC 4.0 (non-commercial, attribution required)**, so Jarvis uses it only for personal, non-commercial use, keeps this attribution, and adapts (ports) code rather than vendoring it wholesale. The ported pieces are `app/undo.py` (the shared undo stack), the `TOOL`-dict auto-discovery loader (`app/tool_loader.py`), and the existing UI-issued confirmation flow (already part of Jarvis, matching Mark-LV's "interface, not the model, issues approval" idea). Free-model listings follow [mnfst/awesome-free-llm-apis](https://github.com/mnfst/awesome-free-llm-apis).
 
 ## Encrypted backup and migration
 

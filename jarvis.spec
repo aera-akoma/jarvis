@@ -23,7 +23,7 @@ a = Analysis(
     [str(project_root / "app" / "__main__.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=[(str(project_root / "app" / "skills"), "app/skills")],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

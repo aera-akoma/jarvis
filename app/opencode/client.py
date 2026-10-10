@@ -14,6 +14,7 @@ from urllib import request as request_module
 from urllib.parse import urlsplit, urlunsplit
 
 from app.security.credentials import CredentialStore
+from app.security.oauth import unwrap_bearer
 
 logger = logging.getLogger("jarvis.provider")
 
@@ -323,18 +324,56 @@ class OpenCodeClient:
             f"model {self._safe_model_name(model_name)!r}: {detail}"
         )
 
-    def __init__(self, base_url: str | None = None, api_key: str | None = None) -> None:
+    @staticmethod
+    def _is_retryable_error(exc: BaseException) -> bool:
+        """True when trying a different model may help.
+
+        This is what powers automatic failover: quota exhaustion, rate limits,
+        billing/resource limits, and transient server overload are retryable on
+        the next model, while auth, model-not-found, and format errors are not.
+        """
+        status = getattr(exc, "status", None)
+        if status in {402, 429, 503, 529}:
+            return True
+        if isinstance(status, int) and 500 <= status < 600:
+            return True
+        text = " ".join(
+            str(getattr(exc, field, "") or "")
+            for field in ("provider_type", "provider_message")
+        ).lower()
+        markers = (
+            "quota", "rate limit", "rate_limit", "ratelimit", "too many requests",
+            "insufficient", "billing", "credit", "resource_exhausted",
+            "resource exhausted", "capacity", "overloaded", "over capacity",
+            "free tier", "free_tier", "freetier",
+        )
+        return any(marker in text for marker in markers)
+
+    def __init__(self, base_url: str | None = None, api_key: str | None = None, credential_name: str = "OpenAI") -> None:
         raw_base_url = base_url or os.getenv("JARVIS_OPENAI_BASE_URL") or os.getenv("OPENCODE_BASE_URL") or os.getenv("OPENAI_BASE_URL")
         self.base_url = self._normalize_base_url(raw_base_url)
+        # Each provider keeps its own credential entry so adding a free-provider
+        # key never overwrites the OpenCode key. The legacy "OpenAI" name is the
+        # default so an existing saved key keeps working after upgrading.
+        self.credential_name = credential_name or "OpenAI"
         stored_key = None
         if api_key is None:
             try:
-                stored_key = CredentialStore().get("OpenAI")
+                stored_key = CredentialStore().get(self.credential_name)
             except (OSError, RuntimeError):
                 stored_key = None
-        self.api_key = api_key or stored_key or os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY")
+        # A stored OAuth bundle (from browser sign-in) yields its current access
+        # token; a plain API key passes through unchanged. No network call here.
+        stored_key = unwrap_bearer(stored_key)
+        # Environment fallbacks are only honoured for the default credential so a
+        # generic OPENAI_API_KEY can never be sent to an unrelated provider.
+        environment_key = None
+        if self.credential_name == "OpenAI":
+            environment_key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("JARVIS_OPENAI_API_KEY")
+        self.api_key = api_key or stored_key or environment_key
         self.session_id: str | None = None
         self.last_error: str | None = None
+        self.last_error_retryable = False
         self._model_cache: list[str] = []
         self._model_metadata: dict[str, dict] = {}
         self._active_connection: http.client.HTTPConnection | None = None
@@ -681,6 +720,7 @@ class OpenCodeClient:
 
     def request_tool_decision(self, *, request: str, model_name: str, tools: list[dict], messages: list[dict], system_prompt: str, attachments: list[dict] | None = None) -> dict:
         """Call the configured chat-completions endpoint using its tool API."""
+        self.last_error_retryable = False
         if not self.base_url:
             return {"error": "No model API endpoint is configured. Set JARVIS_OPENAI_BASE_URL to a provider endpoint that supports chat completions and tool calls."}
         if self._opencode_api_kind() == "unsupported-opencode-family":
@@ -754,6 +794,7 @@ class OpenCodeClient:
             return {"final_response": str(message.get("content") or "The model returned an empty response.")}
         except (error.HTTPError, error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
             self.last_error = self._post_error(endpoint, model_name, exc)
+            self.last_error_retryable = self._is_retryable_error(exc)
         return {"error": self.last_error}
 
     def headers(self) -> dict[str, str]:
