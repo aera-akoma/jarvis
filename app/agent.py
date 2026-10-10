@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,6 +21,15 @@ class OpenAICompatibleModelAdapter:
         self.client = client
         self.model_name = model_name
         self.cancelled = False
+        self._cancellation_lock = threading.Lock()
+
+    def begin_request(self) -> None:
+        with self._cancellation_lock:
+            if self.cancelled:
+                return
+            reset = getattr(self.client, "reset_request_cancellation", None)
+            if reset:
+                reset()
 
     def decide(self, request: str, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
         context = context or {}
@@ -31,14 +41,16 @@ class OpenAICompatibleModelAdapter:
             tools=self.registry.model_definitions(),
             messages=context.get("agent_messages", []),
             system_prompt=context.get("system_prompt", "You are Jarvis, a desktop assistant. Use tools when needed and never claim unverified actions succeeded."),
+            **({"attachments": context["attachments"]} if context.get("attachments") else {}),
         )
         return reply
 
     def cancel(self) -> None:
-        self.cancelled = True
-        cancel = getattr(self.client, "cancel_current_request", None)
-        if cancel:
-            cancel()
+        with self._cancellation_lock:
+            self.cancelled = True
+            cancel = getattr(self.client, "cancel_current_request", None)
+            if cancel:
+                cancel()
 
 
 class AgentLoop:
@@ -63,13 +75,14 @@ class AgentLoop:
         if cancel:
             cancel()
 
-    def format_context(self, *, request: str, project_path: str | None = None, conversation: list[dict[str, Any]] | None = None, memory: list[dict[str, Any]] | None = None, available_tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def format_context(self, *, request: str, project_path: str | None = None, conversation: list[dict[str, Any]] | None = None, memory: list[dict[str, Any]] | None = None, available_tools: list[dict[str, Any]] | None = None, attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         context = {
             "request": request,
             "project_path": project_path or str(Path.cwd()),
             "conversation": conversation or [],
             "memory": memory or [],
             "available_tools": available_tools or self.registry.model_definitions(),
+            "attachments": attachments or [],
             "agent_messages": [],
             "system_prompt": self.build_agent_prompt(request=request, project_path=project_path, conversation=conversation, memory=memory),
         }
@@ -156,7 +169,7 @@ class AgentLoop:
                     step.setdefault("result", {})["action_log_error"] = str(exc)
         return result
 
-    def process_request(self, request: str, *, project_path: str | None = None, allow_confirmation: bool = False, confirm_tool: Callable[[str, dict[str, Any], str], bool] | None = None, conversation: list[dict[str, Any]] | None = None, memory: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def process_request(self, request: str, *, project_path: str | None = None, allow_confirmation: bool = False, confirm_tool: Callable[[str, dict[str, Any], str], bool] | None = None, conversation: list[dict[str, Any]] | None = None, memory: list[dict[str, Any]] | None = None, attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if self.cancelled:
             return {
                 "success": False,
@@ -174,7 +187,11 @@ class AgentLoop:
                 "tool_calls": [],
             }
 
-        context = self.format_context(request=request_text, project_path=project_path, conversation=conversation, memory=memory)
+        begin_request = getattr(self.model_adapter, "begin_request", None)
+        if begin_request:
+            begin_request()
+
+        context = self.format_context(request=request_text, project_path=project_path, conversation=conversation, memory=memory, attachments=attachments)
         tool_calls: list[dict[str, Any]] = []
         iteration = 0
 

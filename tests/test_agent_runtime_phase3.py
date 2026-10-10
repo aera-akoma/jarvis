@@ -100,6 +100,26 @@ def test_model_adapter_forwards_stop_to_provider_client():
     assert client.cancelled is True
 
 
+def test_new_agent_request_resets_previous_stop_state_without_clearing_adapter_stop(monkeypatch):
+    client = OpenCodeClient(base_url="https://provider.example/v1")
+    client.cancel_current_request()
+
+    def decide(**_kwargs):
+        assert client._request_cancelled.is_set() is False
+        return {"final_response": "ready"}
+
+    monkeypatch.setattr(client, "request_tool_decision", decide)
+    adapter = OpenAICompatibleModelAdapter(ToolRegistry(), client, "model")
+    result = AgentLoop(model_adapter=adapter).process_request("Say hello")
+
+    assert result["success"] is True
+    assert client._request_cancelled.is_set() is False
+
+    adapter.cancel()
+    adapter.begin_request()
+    assert client._request_cancelled.is_set() is True
+
+
 def test_provider_client_closes_active_socket_on_stop():
     class Socket:
         shutdown_called = False
@@ -183,7 +203,11 @@ def test_pyside_chat_runs_approved_tool_and_persists_model_reply(tmp_path, monke
         {"final_response": "The file was written through the approved agent loop."},
     ])
     window.runtime.request_tool_decision = lambda **_kwargs: next(model_replies)
-    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes)
+    def approve_tool(request):
+        request["approved"] = True
+        request["event"].set()
+
+    window._confirm_tool_call = approve_tool
     window.prompt_input.setText("Hi Jarvis")
 
     window.send_message()
@@ -278,6 +302,113 @@ def test_stop_cancels_an_in_flight_model_request():
     assert completed.wait(2)
     worker.join()
     assert result_holder[0]["cancelled"] is True
+
+
+def test_agent_worker_stop_releases_pending_confirmation():
+    import threading
+    import time
+
+    from app.ui.main_window import AgentWorker
+
+    worker = AgentWorker(AgentLoop(), "request", ".", [], [])
+    result = []
+    completed = threading.Event()
+
+    def wait_for_approval():
+        result.append(worker._confirm("write_file", {}, "moderate"))
+        completed.set()
+
+    thread = threading.Thread(target=wait_for_approval)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while worker._pending_confirmation is None and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert worker._pending_confirmation is not None
+
+    worker.cancel()
+
+    assert completed.wait(1)
+    thread.join()
+    assert result == [False]
+
+
+def test_workflow_worker_stop_releases_pending_confirmation():
+    import threading
+    import time
+
+    from app.ui.main_window import WorkflowWorker
+    from app.permissions.policy import PermissionPolicy
+
+    worker = WorkflowWorker(None, "workflow-id", ToolRegistry(), PermissionPolicy())
+    result = []
+    completed = threading.Event()
+
+    def wait_for_approval():
+        result.append(worker._confirm("run_workflow", {}, "dangerous"))
+        completed.set()
+
+    thread = threading.Thread(target=wait_for_approval)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while worker._pending_confirmation is None and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert worker._pending_confirmation is not None
+
+    worker.cancel()
+
+    assert completed.wait(1)
+    thread.join()
+    assert result == [False]
+
+
+def test_stop_dismisses_non_modal_permission_dialog(tmp_path, monkeypatch):
+    import threading
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from app.config import AppConfig
+    from app.ui.main_window import MainWindow
+
+    application = QApplication.instance() or QApplication([])
+    monkeypatch.setattr("app.ui.main_window.OpenCodeClient.available_models", lambda _self: ["test-model"])
+    window = MainWindow(AppConfig(data_dir=str(tmp_path)))
+    request = {"tool": "write_file", "arguments": {}, "level": "moderate", "event": threading.Event(), "approved": False}
+
+    window._confirm_tool_call(request)
+    assert window._pending_confirmation_box.windowModality() == Qt.WindowModality.NonModal
+
+    window.stop_current_task()
+    application.processEvents()
+
+    assert request["event"].is_set()
+    assert request["approved"] is False
+    window.close()
+    application.processEvents()
+
+
+def test_attachment_picker_loads_supported_text_file(tmp_path, monkeypatch):
+    import time
+    from PySide6.QtWidgets import QApplication
+    from app.config import AppConfig
+    from app.ui.main_window import MainWindow
+
+    attachment = tmp_path / "notes.txt"
+    attachment.write_text("test attachment contents", encoding="utf-8")
+    application = QApplication.instance() or QApplication([])
+    monkeypatch.setattr("app.ui.main_window.OpenCodeClient.available_models", lambda _self: ["test-model"])
+    monkeypatch.setattr("app.ui.main_window.QFileDialog.getOpenFileNames", lambda *_args, **_kwargs: ([str(attachment)], ""))
+    window = MainWindow(AppConfig(data_dir=str(tmp_path / "jarvis-data")))
+    deadline = time.monotonic() + 2
+    while window._models_loading and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
+
+    window.select_attachments()
+    loaded = window._load_pending_attachments("test-model")
+
+    assert loaded == [{"kind": "text", "name": "notes.txt", "content": "test attachment contents"}]
+    assert "1 attached" in window.attachment_status.text()
+    window.close()
+    application.processEvents()
 
 
 def test_agent_loop_stops_when_cancel_requested():

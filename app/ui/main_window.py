@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Optional
 import json
 import threading
@@ -9,6 +10,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -47,24 +49,45 @@ class AgentWorker(QThread):
     result_ready = Signal(object)
     confirmation_requested = Signal(object)
 
-    def __init__(self, agent: AgentLoop, request: str, project_path: str, conversation: list[dict], memory: list[dict]) -> None:
+    def __init__(self, agent: AgentLoop, request: str, project_path: str, conversation: list[dict], memory: list[dict], attachments: list[dict] | None = None) -> None:
         super().__init__()
         self.agent = agent
         self.request = request
         self.project_path = project_path
         self.conversation = conversation
         self.memory = memory
+        self.attachments = attachments or []
+        self._cancel_requested = threading.Event()
+        self._pending_confirmation: dict | None = None
+        self._confirmation_lock = threading.Lock()
+
+    def cancel(self) -> None:
+        self._cancel_requested.set()
+        with self._confirmation_lock:
+            pending = self._pending_confirmation
+        if pending is not None:
+            pending["approved"] = False
+            pending["event"].set()
 
     def _confirm(self, tool: str, arguments: dict, level: str) -> bool:
         response = {"tool": tool, "arguments": arguments, "level": level, "event": threading.Event(), "approved": False}
+        with self._confirmation_lock:
+            self._pending_confirmation = response
         self.confirmation_requested.emit(response)
-        response["event"].wait()
-        return bool(response["approved"])
+        while not response["event"].wait(0.1):
+            if self._cancel_requested.is_set():
+                response["approved"] = False
+                break
+        with self._confirmation_lock:
+            if self._pending_confirmation is response:
+                self._pending_confirmation = None
+        return bool(response["approved"] and not self._cancel_requested.is_set())
 
     def run(self) -> None:
         try:
             result = self.agent.process_request(self.request, project_path=self.project_path,
-                                                conversation=self.conversation, memory=self.memory, confirm_tool=self._confirm)
+                                                conversation=self.conversation, memory=self.memory, attachments=self.attachments,
+                                                confirm_tool=self._confirm)
         except Exception as exc:
             result = {"success": False, "cancelled": self.agent.cancelled,
                       "summary": f"Agent request failed: {exc}", "tool_calls": []}
@@ -79,15 +102,25 @@ class WorkflowWorker(QThread):
         super().__init__()
         self.manager, self.workflow_id, self.registry, self.policy = manager, workflow_id, registry, policy
         self._cancel_requested = threading.Event()
+        self._pending_confirmation: dict | None = None
 
     def cancel(self) -> None:
         self._cancel_requested.set()
+        if self._pending_confirmation is not None:
+            self._pending_confirmation["approved"] = False
+            self._pending_confirmation["event"].set()
 
     def _confirm(self, tool: str, arguments: dict, level: str) -> bool:
         response = {"tool": tool, "arguments": arguments, "level": level, "event": threading.Event(), "approved": False}
+        self._pending_confirmation = response
         self.confirmation_requested.emit(response)
-        response["event"].wait()
-        return bool(response["approved"])
+        while not response["event"].wait(0.1):
+            if self._cancel_requested.is_set():
+                response["approved"] = False
+                break
+        if self._pending_confirmation is response:
+            self._pending_confirmation = None
+        return bool(response["approved"] and not self._cancel_requested.is_set())
 
     def run(self) -> None:
         self.result_ready.emit(self.manager.execute_workflow(
@@ -175,6 +208,9 @@ class MainWindow(QMainWindow):
         self.windows_controller = WindowsController()
         self.agent_loop: AgentLoop | None = None
         self.agent_worker: AgentWorker | None = None
+        self.pending_attachments: list[dict[str, str]] = []
+        self._pending_confirmation_box: QMessageBox | None = None
+        self._pending_confirmation_response: dict | None = None
         self.task_manager = TaskManager()
         self.current_task = self.task_manager.create_task("Current session", project_path=self.config.data_dir)
         conversations = self.session_manager.list_conversations()
@@ -217,7 +253,9 @@ class MainWindow(QMainWindow):
         self._model_connection_error = error_message
         self.model_selector.clear()
         if not models:
-            if "HTTP 403" in error_message:
+            if "Cloudflare error 1010" in error_message:
+                failure_label = "Provider edge blocked the request"
+            elif "HTTP 403" in error_message:
                 failure_label = "Access denied (HTTP 403)"
             elif "HTTP 401" in error_message:
                 failure_label = "Authentication failed (HTTP 401)"
@@ -319,7 +357,13 @@ class MainWindow(QMainWindow):
         composer_layout.setContentsMargins(12, 10, 12, 12)
         composer_layout.setSpacing(8)
 
-        attach = QPushButton("📎")
+        self.attach_button = QPushButton("📎")
+        self.attach_button.setToolTip("Attach text or a supported image")
+        self.attach_button.clicked.connect(self.select_attachments)
+        self.attachment_status = QLabel("")
+        self.clear_attachments_button = QPushButton("Clear")
+        self.clear_attachments_button.clicked.connect(self.clear_attachments)
+        self.clear_attachments_button.setVisible(False)
         voice = QPushButton("🎤")
         voice.clicked.connect(self.show_voice_status)
         self.voice_output_button = QPushButton("🔊 Voice: On" if self.voice_output_enabled else "🔊 Voice: Off")
@@ -336,7 +380,9 @@ class MainWindow(QMainWindow):
         send = QPushButton("Send →")
         send.clicked.connect(self.send_message)
 
-        composer_layout.addWidget(attach)
+        composer_layout.addWidget(self.attach_button)
+        composer_layout.addWidget(self.attachment_status)
+        composer_layout.addWidget(self.clear_attachments_button)
         composer_layout.addWidget(voice)
         composer_layout.addWidget(self.voice_output_button)
         composer_layout.addWidget(search)
@@ -372,9 +418,75 @@ class MainWindow(QMainWindow):
             role = message["role"].title()
             self.chat_history.append(f"{role}: {message['content']}")
 
+    def select_attachments(self) -> None:
+        paths, _filter = QFileDialog.getOpenFileNames(
+            self, "Attach files", "",
+            "Supported files (*.txt *.md *.csv *.json *.log *.png *.jpg *.jpeg *.webp *.bmp)",
+        )
+        if not paths:
+            return
+        image_support = getattr(self.runtime, "model_supports_images", lambda _model: False)(self.model_selector.currentText())
+        accepted = []
+        rejected = []
+        for path in paths:
+            suffix = os.path.splitext(path)[1].lower()
+            kind = "text" if suffix in {".txt", ".md", ".csv", ".json", ".log"} else "image" if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"} else None
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                rejected.append(f"{os.path.basename(path)} could not be read")
+                continue
+            limit = 1_000_000 if kind == "text" else 10_000_000
+            if kind is None:
+                rejected.append(f"{os.path.basename(path)} has an unsupported format")
+            elif size > limit:
+                rejected.append(f"{os.path.basename(path)} exceeds the {limit // 1_000_000} MB limit")
+            elif kind == "image" and not image_support:
+                rejected.append(f"{os.path.basename(path)} requires a model with confirmed image input support")
+            else:
+                accepted.append({"path": path, "kind": kind, "name": os.path.basename(path)})
+        known = {item["path"] for item in self.pending_attachments}
+        self.pending_attachments.extend(item for item in accepted if item["path"] not in known)
+        self._update_attachment_status()
+        if rejected:
+            QMessageBox.warning(self, "Some attachments were not added", "\n".join(rejected))
+
+    def clear_attachments(self) -> None:
+        self.pending_attachments.clear()
+        self._update_attachment_status()
+
+    def _update_attachment_status(self) -> None:
+        count = len(self.pending_attachments)
+        self.attachment_status.setText(f"{count} attached" if count else "")
+        self.clear_attachments_button.setVisible(bool(count))
+
+    def _load_pending_attachments(self, model_name: str) -> list[dict] | None:
+        loaded = []
+        for item in self.pending_attachments:
+            try:
+                if item["kind"] == "text":
+                    if os.path.getsize(item["path"]) > 1_000_000:
+                        raise ValueError
+                    with open(item["path"], "r", encoding="utf-8") as stream:
+                        content = stream.read()
+                    if len(content) > 1_000_000:
+                        raise ValueError
+                    loaded.append({"kind": "text", "name": item["name"], "content": content})
+                elif item["kind"] == "image":
+                    if not getattr(self.runtime, "model_supports_images", lambda _model: False)(model_name):
+                        QMessageBox.warning(self, "Image input unsupported", f"The selected model is not confirmed to support images: {item['name']}")
+                        return None
+                    if os.path.getsize(item["path"]) > 10_000_000:
+                        raise ValueError
+                    loaded.append({"kind": "image", "name": item["name"], "path": item["path"]})
+            except (OSError, UnicodeError, ValueError):
+                QMessageBox.warning(self, "Attachment unavailable", f"Could not read {item['name']} or it exceeds its size limit.")
+                return None
+        return loaded
+
     def send_message(self) -> None:
         text = self.prompt_input.text().strip()
-        if not text:
+        if not text and not self.pending_attachments:
             return
 
         if self.agent_worker is not None and self.agent_worker.isRunning():
@@ -395,30 +507,60 @@ class MainWindow(QMainWindow):
             )
             return
         model_name = self.model_selector.currentText()
+        attachments = self._load_pending_attachments(model_name)
+        if attachments is None:
+            return
+        request_text = text or "Please inspect the attached files."
+        display_text = request_text
+        if attachments:
+            display_text += "\n\n" + "\n".join(f"[Attached file: {item['name']}]" for item in attachments)
         registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager)
         self.agent_loop = AgentLoop(registry=registry, model_adapter=OpenAICompatibleModelAdapter(registry, self.runtime, model_name), action_logger=self._log_action, workflow_manager=self.workflow_manager)
-        self.current_task = self.task_manager.create_task(f"Chat: {text[:32]}", project_path=self.config.data_dir, selected_model=model_name)
+        self.current_task = self.task_manager.create_task(f"Chat: {request_text[:32]}", project_path=self.config.data_dir, selected_model=model_name)
         self.task_manager.start(self.current_task.id)
         self.status_label.setText("Running")
 
-        self.session_manager.save_message(self.active_conversation["id"], "user", text)
+        self.session_manager.save_message(self.active_conversation["id"], "user", display_text)
         self.pending_memory_candidates = self.memory_candidate_extractor.extract_many(text)
         self.prompt_input.clear()
+        self.pending_attachments.clear()
+        self._update_attachment_status()
         history = self.session_manager.get_messages(self.active_conversation["id"])
-        memory_query = " ".join([text, *(message.get("content", "") for message in history[-7:])])
+        memory_query = " ".join([request_text, *(message.get("content", "") for message in history[-7:])])
         memories = self.memory_manager.retrieve_relevant(memory_query)
-        self.agent_worker = AgentWorker(self.agent_loop, text, self.config.data_dir, history[:-1], memories)
+        self.agent_worker = AgentWorker(self.agent_loop, request_text, self.config.data_dir, history[:-1], memories, attachments)
         self.agent_worker.confirmation_requested.connect(self._confirm_tool_call)
         self.agent_worker.result_ready.connect(self._agent_finished)
         self.agent_worker.start()
 
     def _confirm_tool_call(self, request: dict) -> None:
+        if request["event"].is_set():
+            return
         details = json.dumps(request["arguments"], ensure_ascii=False, indent=2)
         tool_definition = self.agent_loop.registry.get(request["tool"]) if self.agent_loop else None
         description = f"{tool_definition.description}\n\n" if tool_definition else ""
-        answer = QMessageBox.question(self, "Jarvis permission", f"{description}Allow {request['level']} action: {request['tool']}?\n\n{details}", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        request["approved"] = answer == QMessageBox.StandardButton.Yes
-        request["event"].set()
+        box = QMessageBox(self)
+        box.setWindowTitle("Jarvis permission")
+        box.setText(f"{description}Allow {request['level']} action: {request['tool']}?\n\n{details}")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        self._pending_confirmation_box = box
+        self._pending_confirmation_response = request
+
+        def finish_confirmation(button=None) -> None:
+            if self._pending_confirmation_response is not request:
+                return
+            request["approved"] = button is box.button(QMessageBox.StandardButton.Yes)
+            request["event"].set()
+            self._pending_confirmation_box = None
+            self._pending_confirmation_response = None
+            box.close()
+            box.deleteLater()
+
+        box.buttonClicked.connect(finish_confirmation)
+        box.finished.connect(lambda _result: finish_confirmation())
+        box.show()
 
     def _agent_finished(self, result: dict) -> None:
         response = result.get("summary") or "Jarvis did not return a response."
@@ -467,8 +609,15 @@ class MainWindow(QMainWindow):
     def stop_current_task(self) -> None:
         if self.agent_loop is not None:
             self.agent_loop.cancel()
+        if self.agent_worker is not None:
+            self.agent_worker.cancel()
         if self.workflow_worker is not None and self.workflow_worker.isRunning():
             self.workflow_worker.cancel()
+        if self._pending_confirmation_response is not None:
+            self._pending_confirmation_response["approved"] = False
+            self._pending_confirmation_response["event"].set()
+            if self._pending_confirmation_box is not None:
+                self._pending_confirmation_box.close()
         self.task_manager.request_stop(self.current_task.id)
         self.status_label.setText("Stopped")
         self.task_manager.emergency_stop.stop()

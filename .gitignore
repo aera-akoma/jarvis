@@ -25,3 +25,6 @@ exports/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Refact agent runtime state
+.refact/

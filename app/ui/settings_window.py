@@ -15,13 +15,44 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QThread, Signal
 
 from app.config import AppConfig
 from app.core.settings_manager import SettingsManager
 from app.security.credentials import CredentialStore
 from app.startup import StartupManager
 from app.export_import.import_export import ExportImportManager
+from app.opencode.client import OpenCodeClient
+
+
+class ConnectionTestWorker(QThread):
+    result_ready = Signal(object)
+
+    def __init__(self, base_url: str, api_key: str | None) -> None:
+        super().__init__()
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def run(self) -> None:
+        client = OpenCodeClient(base_url=self.base_url, api_key=self.api_key)
+        models = client.discover_models()
+        self.result_ready.emit({"models": models, "error": client.last_error})
+
+
+class ModelAccessTestWorker(QThread):
+    result_ready = Signal(object)
+
+    def __init__(self, base_url: str, api_key: str | None, model: str) -> None:
+        super().__init__()
+        self.base_url = base_url
+        self.api_key = api_key
+        self.model = model
+
+    def run(self) -> None:
+        client = OpenCodeClient(base_url=self.base_url, api_key=self.api_key)
+        result = client.probe_model_access(self.model)
+        result["model"] = self.model
+        self.result_ready.emit(result)
 
 
 class SettingsWindow(QDialog):
@@ -57,8 +88,33 @@ class SettingsWindow(QDialog):
         form.addRow("Theme", self.theme_input)
         form.addRow("Default model", self.model_input)
         form.addRow("Runtime URL", self.base_url_input)
+        self.base_url_input.setToolTip(
+            "OpenCode API key from /connect: https://opencode.ai/zen/v1\n"
+            "Console service-account key: https://opencode.ai/inference/openai/v1"
+        )
+        base_url_hint = QLabel(
+            "Both routes are OpenCode but use different keys. If you got your key from the OpenCode "
+            "TUI's /connect command, use https://opencode.ai/zen/v1. If it is a Console service-account "
+            "key (Console > Keys), use https://opencode.ai/inference/openai/v1. Jarvis never switches this silently."
+        )
+        base_url_hint.setWordWrap(True)
+        form.addRow("", base_url_hint)
         form.addRow("API key", self.api_key_input)
+        self.test_connection_button = QPushButton("Test connection")
+        self.test_connection_button.clicked.connect(self.test_connection)
+        form.addRow("Provider", self.test_connection_button)
+        self.test_access_button = QPushButton("Test model access (sends one tiny request)")
+        self.test_access_button.clicked.connect(self.test_model_access)
+        form.addRow("", self.test_access_button)
         layout.addLayout(form)
+        self.connection_status = QLabel("Test connection checks the public model catalog only. Use Test model access to confirm the saved key can actually reach a model.")
+        self.connection_status.setWordWrap(True)
+        layout.addWidget(self.connection_status)
+        self.access_status = QLabel("")
+        self.access_status.setWordWrap(True)
+        layout.addWidget(self.access_status)
+        self._connection_worker: ConnectionTestWorker | None = None
+        self._access_worker: ModelAccessTestWorker | None = None
         layout.addWidget(self.startup_checkbox)
 
         transfer_row = QHBoxLayout()
@@ -98,6 +154,93 @@ class SettingsWindow(QDialog):
     def _ask_passphrase(self, title: str, prompt: str) -> str | None:
         value, accepted = QInputDialog.getText(self, title, prompt, QLineEdit.EchoMode.Password)
         return value if accepted else None
+
+    def test_connection(self) -> None:
+        if self._connection_worker is not None and self._connection_worker.isRunning():
+            return
+        runtime_url = self.base_url_input.text().strip()
+        if not runtime_url:
+            self.connection_status.setText("Enter a provider runtime URL before testing the connection.")
+            return
+        api_key = self.api_key_input.text().strip() or None
+        self.connection_status.setText("Testing catalog GET in the background…")
+        self.test_connection_button.setEnabled(False)
+        worker = ConnectionTestWorker(runtime_url, api_key)
+        self._connection_worker = worker
+        worker.result_ready.connect(self._connection_test_finished)
+        worker.finished.connect(self._connection_worker_finished)
+        worker.start()
+
+    def _connection_test_finished(self, result: dict) -> None:
+        models = result.get("models") or []
+        if not models:
+            self.connection_status.setText(result.get("error") or "Catalog GET failed without a safe diagnostic.")
+            return
+        message = (
+            f"Catalog GET succeeded; {len(models)} Chat Completions-compatible model(s) found. "
+            "This does not verify chat-completions access or model permissions."
+        )
+        default_model = self.model_input.text().strip()
+        if default_model:
+            message += (
+                f" Default model {default_model!r} is available."
+                if default_model in models
+                else f" Default model {default_model!r} is NOT in this compatible list; pick another in Settings."
+            )
+        self.connection_status.setText(message)
+
+    def _connection_worker_finished(self) -> None:
+        self.test_connection_button.setEnabled(True)
+        worker = self.sender()
+        if worker is self._connection_worker:
+            self._connection_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def test_model_access(self) -> None:
+        if self._access_worker is not None and self._access_worker.isRunning():
+            return
+        runtime_url = self.base_url_input.text().strip()
+        if not runtime_url:
+            self.access_status.setText("Enter a provider runtime URL before testing model access.")
+            return
+        model = self.model_input.text().strip() or self.config.default_model()
+        api_key = self.api_key_input.text().strip() or None
+        self.access_status.setText(f"Testing access to {model!r} with one small request…")
+        self.test_access_button.setEnabled(False)
+        worker = ModelAccessTestWorker(runtime_url, api_key, model)
+        self._access_worker = worker
+        worker.result_ready.connect(self._access_test_finished)
+        worker.finished.connect(self._access_worker_finished)
+        worker.start()
+
+    def _access_test_finished(self, result: dict) -> None:
+        if result.get("ok"):
+            self.access_status.setText(
+                f"Access confirmed for {result.get('model')!r}: the provider accepted the credential and answered. "
+                "The saved key can reach this model."
+            )
+        else:
+            self.access_status.setText(
+                result.get("error") or "Model access test failed without a safe provider diagnostic."
+            )
+
+    def _access_worker_finished(self) -> None:
+        self.test_access_button.setEnabled(True)
+        worker = self.sender()
+        if worker is self._access_worker:
+            self._access_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def closeEvent(self, event) -> None:
+        if self._connection_worker is not None and self._connection_worker.isRunning():
+            self._connection_worker.requestInterruption()
+            self._connection_worker.wait(6500)
+        if self._access_worker is not None and self._access_worker.isRunning():
+            self._access_worker.requestInterruption()
+            self._access_worker.wait(32000)
+        super().closeEvent(event)
 
     def export_backup(self) -> None:
         path, _filter = QFileDialog.getSaveFileName(self, "Save encrypted Jarvis backup", str(self.config.data_dir_path / "exports" / "jarvis-backup.jarvisbackup"), "Jarvis encrypted backup (*.jarvisbackup)")

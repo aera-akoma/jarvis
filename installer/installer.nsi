@@ -5,7 +5,9 @@
 !define APP_PUBLISHER "Jarvis"
 !define APP_EXE "Jarvis.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Jarvis"
+!ifndef DIST_ROOT
 !define DIST_ROOT "..\dist"
+!endif
 !define APP_DIST "${DIST_ROOT}\Jarvis"
 
 Name "${APP_NAME} ${APP_VERSION}"
