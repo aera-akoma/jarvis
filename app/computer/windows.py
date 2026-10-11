@@ -79,3 +79,21 @@ class WindowsController(WindowsDesktopController):
 
     def close_browser(self) -> dict[str, Any]:
         return self.browser.close_browser()
+
+    def go_back(self) -> dict[str, Any]:
+        return self.browser.go_back()
+
+    def go_forward(self) -> dict[str, Any]:
+        return self.browser.go_forward()
+
+    def press_browser_key(self, key: str, selector: str | None = None) -> dict[str, Any]:
+        return self.browser.press_browser_key(key, selector)
+
+    def scroll_browser(self, delta_x: int = 0, delta_y: int = 0, selector: str | None = None) -> dict[str, Any]:
+        return self.browser.scroll_browser(delta_x, delta_y, selector)
+
+    def wait_browser(self, state: str | None = None, milliseconds: int = 0) -> dict[str, Any]:
+        return self.browser.wait_browser(state, milliseconds)
+
+    def extract_links(self, limit: int = 100) -> dict[str, Any]:
+        return self.browser.extract_links(limit)

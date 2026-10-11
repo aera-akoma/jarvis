@@ -7,6 +7,14 @@ import threading
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+# Named keys the model may press while a page has focus. Free text goes through
+# ``type_browser``; arbitrary keystrokes are intentionally not exposed.
+_BROWSER_KEYS = frozenset({
+    "Enter", "Tab", "Escape", "Backspace", "Delete", "Home", "End",
+    "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "F5", "F12",
+})
+
 
 class BrowserController:
     """A persistent, headed browser session serialized on its owner thread."""
@@ -150,6 +158,68 @@ class BrowserController:
             self._playwright = None
         return {"closed": True}
 
+    def _go_back(self) -> dict[str, Any]:
+        page = self._require_web_page()
+        response = page.go_back(wait_until="domcontentloaded", timeout=15_000)
+        return {"url": page.url, "title": page.title(), "status": response.status if response else None}
+
+    def _go_forward(self) -> dict[str, Any]:
+        page = self._require_web_page()
+        response = page.go_forward(wait_until="domcontentloaded", timeout=15_000)
+        return {"url": page.url, "title": page.title(), "status": response.status if response else None}
+
+    def _press_browser_key(self, key: str, selector: str | None = None) -> dict[str, Any]:
+        page = self._require_web_page()
+        key = (key or "").strip()
+        if key not in _BROWSER_KEYS:
+            raise ValueError(f"Browser key must be one of: {', '.join(sorted(_BROWSER_KEYS))}.")
+        if selector:
+            self._locator(selector).focus(timeout=10_000)
+        page.keyboard.press(key)
+        return {"key": key, "selector": selector}
+
+    def _browser_scroll(self, delta_x: int = 0, delta_y: int = 0, selector: str | None = None) -> dict[str, Any]:
+        page = self._require_web_page()
+        if selector:
+            self._locator(selector).scroll_into_view_if_needed(timeout=10_000)
+            return {"mode": "into_view", "selector": selector}
+        if not (-10_000 <= int(delta_x) <= 10_000 and -10_000 <= int(delta_y) <= 10_000):
+            raise ValueError("Scroll deltas are limited to -10,000..10,000 pixels.")
+        page.mouse.wheel(int(delta_x), int(delta_y))
+        return {"mode": "wheel", "delta_x": int(delta_x), "delta_y": int(delta_y)}
+
+    def _browser_wait(self, state: str | None = None, milliseconds: int = 0) -> dict[str, Any]:
+        page = self._require_web_page()
+        if state:
+            state = (state or "").strip().lower()
+            if state not in {"load", "domcontentloaded", "networkidle"}:
+                raise ValueError("Wait state must be load, domcontentloaded, or networkidle.")
+            page.wait_for_load_state(state=state, timeout=30_000)
+            return {"waited_for": state}
+        milliseconds = int(milliseconds or 0)
+        if not 0 <= milliseconds <= 30_000:
+            raise ValueError("Wait time is limited to 0-30,000 milliseconds.")
+        if milliseconds:
+            page.wait_for_timeout(milliseconds)
+        return {"waited_ms": milliseconds}
+
+    def _extract_links(self, limit: int = 100) -> dict[str, Any]:
+        page = self._require_web_page()
+        limit = max(1, min(int(limit or 100), 200))
+        links = page.eval_on_selector_all(
+            "a[href]",
+            r"(els, max) => els.slice(0, max).filter(a => /^https?:\/\/i.test(a.href)).map(a => ({ text: (a.innerText || '').trim(), href: a.href }))",
+            limit,
+        )
+        seen: dict[str, dict[str, Any]] = {}
+        for link in links:
+            href = (link.get("href") or "").strip()
+            if not href:
+                continue
+            seen.setdefault(href, {"text": (link.get("text") or "").strip() or href, "href": href})
+        result = list(seen.values())
+        return {"url": page.url, "links": result, "count": len(result)}
+
     def open_browser(self, url: str) -> dict[str, Any]:
         return self._dispatch("open_browser", url)
 
@@ -170,3 +240,21 @@ class BrowserController:
 
     def close_browser(self) -> dict[str, Any]:
         return self._dispatch("close_browser")
+
+    def go_back(self) -> dict[str, Any]:
+        return self._dispatch("go_back")
+
+    def go_forward(self) -> dict[str, Any]:
+        return self._dispatch("go_forward")
+
+    def press_browser_key(self, key: str, selector: str | None = None) -> dict[str, Any]:
+        return self._dispatch("press_browser_key", key, selector)
+
+    def scroll_browser(self, delta_x: int = 0, delta_y: int = 0, selector: str | None = None) -> dict[str, Any]:
+        return self._dispatch("browser_scroll", delta_x, delta_y, selector)
+
+    def wait_browser(self, state: str | None = None, milliseconds: int = 0) -> dict[str, Any]:
+        return self._dispatch("browser_wait", state, milliseconds)
+
+    def extract_links(self, limit: int = 100) -> dict[str, Any]:
+        return self._dispatch("extract_links", limit)

@@ -17,6 +17,10 @@ hidden_imports = [
     "pyttsx3.drivers.sapi5",
     "playwright.sync_api",
     "ddgs",
+    # Lazy document readers used by the read_document tool.
+    "pypdf",
+    "docx",
+    "openpyxl",
 ]
 
 a = Analysis(

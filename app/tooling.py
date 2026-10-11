@@ -126,6 +126,12 @@ class ToolRegistry:
             ("read_page", "Read the active page text; the text is sent to the configured model for assistance.", "dangerous", {}, self.desktop.read_page),
             ("take_browser_screenshot", "Capture the active page; its image is sent to the configured model for analysis.", "moderate", {"path": "PNG output file path"}, self.desktop.take_browser_screenshot),
             ("close_browser", "Close Jarvis's managed browser window and its tabs.", "dangerous", {}, self.desktop.close_browser),
+            ("browser_go_back", "Go back one page in the active browser tab's history.", "moderate", {}, self.desktop.go_back),
+            ("browser_go_forward", "Go forward one page in the active browser tab's history.", "moderate", {}, self.desktop.go_forward),
+            ("press_browser_key", "Press one named key (Enter submits a focused form, Tab moves focus, Escape cancels, arrows move).", "dangerous", {"key": "key name such as Enter, Tab, Escape, or an arrow key", "selector": "optional CSS selector to focus before pressing (omit for the current focus)"}, self.desktop.press_browser_key),
+            ("browser_scroll", "Scroll the active page by pixel deltas, or scroll a uniquely matched element into view.", "moderate", {"delta_x": "horizontal scroll pixels (0 for none)", "delta_y": "vertical scroll pixels", "selector": "optional CSS selector to scroll into view"}, self.desktop.scroll_browser),
+            ("browser_wait", "Wait for the active page to reach a load state, or pause briefly before the next step.", "safe", {"state": "load, domcontentloaded, or networkidle (optional)", "milliseconds": "delay in ms, 0-30000 (optional)"}, self.desktop.wait_browser),
+            ("extract_links", "List the unique http(s) links on the active page (up to 200).", "moderate", {"limit": "maximum number of links, 1-200"}, self.desktop.extract_links),
         ]
         for name, description, permission, parameters, handler in definitions:
             self.register(ToolDefinition(name, description, permission, parameters, handler))
@@ -137,6 +143,13 @@ class ToolRegistry:
                                 {"title": "visible window title", "width": "new width in pixels", "height": "new height in pixels"},
                                 self.desktop.resize_window,
                                 undo_capture=self._capture_window_geometry, undo_label="restore the window size", undo_restore=self._restore_window_geometry))
+        self.register(ToolDefinition(
+            "read_document",
+            "Extract text from a local PDF, Word (.docx), Excel (.xlsx), or plain-text file so its content can be analyzed.",
+            "safe",
+            {"path": "file path"},
+            self._read_document,
+        ))
 
 
     def _register_skills(self) -> None:
@@ -205,6 +218,10 @@ class ToolRegistry:
         if not file_path.exists():
             return {"ok": False, "success": False, "error": f"File not found: {path}"}
         return {"ok": True, "success": True, "path": str(file_path), "content": file_path.read_text(encoding="utf-8")}
+
+    def _read_document(self, path: str) -> dict[str, Any]:
+        from app.content_reader import read_document
+        return read_document(path)
 
     def _write_file(self, path: str, content: str = "") -> dict[str, Any]:
         file_path = Path(path)
