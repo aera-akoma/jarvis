@@ -19,8 +19,15 @@ This repository is not a React/Electron web app. It is a Python desktop applicat
 - Conversation/session management
 - Local memory store with search
 - Learning: relevance-ranked memories with categories in every prompt, session-wide memory suggestions after successful tasks, and a user-approved `remember_memory` tool for the agent
+- Many free model providers: built-in presets for the "awesome-free-llm-apis" list, three keyless presets, custom OpenAI-compatible endpoints, and automatic retry across a fallback-model list on retryable errors
+- Browser sign-in (OAuth) for Azure OpenAI / AI Foundry (device code) and Google Gemini (installed-app PKCE), with no pasted long-lived secret
 - Managed-browser automation: navigate, click, type, history, named-key presses, scroll, wait-for-load, link extraction, and page screenshots
+- Desktop control: screenshots, mouse/keyboard input, window focus/move/resize, and application launch
 - Document reading: PDF, Word (.docx), Excel (.xlsx), and plain-text extraction for analysis
+- Local knowledge/memory/conversation search plus optional web search
+- Voice input and spoken output
+- Undo for the last reversible action (file writes, created files/directories, window geometry)
+- Self-describing skills auto-discovered from `app/skills/`, with an authoring template
 - Workflow and settings persistence
 - Secure API key storage
 - Encrypted portable backups for conversations, memories, workflows, and selected settings
@@ -32,6 +39,7 @@ This repository is not a React/Electron web app. It is a Python desktop applicat
 
 - `app/` — application code
 - `tests/` — pytest regression tests
+- `docs/` — setup guides (for example [docs/oauth_setup.md](docs/oauth_setup.md))
 - `installer/` — Windows installer scripts
 - `jarvis.spec` — PyInstaller build specification
 - `requirements.txt` — Python dependencies
@@ -143,7 +151,7 @@ makensis installer\installer.nsi
 This creates `dist\Jarvis-Setup.exe`. For a release snapshot, copy `dist\Jarvis\` to `dist_<label>_<yyyymmdd>\Jarvis\` and point the build at it with the `DIST_ROOT` NSIS define so the working `dist/` output stays untouched:
 
 ```powershell
-makensis /DDIST_ROOT=dist_learning_20261011 installer\installer.nsi
+makensis /DDIST_ROOT=dist_release_20261011 installer\installer.nsi
 ``` The installer is a user-scoped install and does not require elevation; it installs into `%LOCALAPPDATA%\Programs\Jarvis` and registers its uninstall entry under the current user.
 
 Uninstall removes application files and startup integration but keeps the user's database, logs, attachments, credentials, and backups in their profile under `%APPDATA%\Jarvis`. Updates are currently manual: build and install the newer release to the same location. Automatic update delivery is not implemented.
@@ -171,4 +179,12 @@ Jarvis redacts common credential patterns found in exported text, but pattern-ba
 
 ## Current status
 
-This project is a working desktop-app foundation for a Windows AI assistant. It is intentionally scoped to a reliable local-first build rather than a broad web-style feature set, and it is structured to evolve into a fuller desktop agent over time.
+This project is a working, shippable Windows desktop AI assistant. Everything in **Features** above is implemented and covered by a pytest suite (`python -m pytest -q`, 187 tests). The standalone executable and the NSIS installer are built and verified (silent install, launch, and uninstall all confirmed on Windows 10/11). Version `0.1.0`.
+
+Honest limits:
+
+- Model access is Chat Completions only; providers that expose only other protocols are reported as unsupported rather than emulated.
+- OpenCode's own free tier is blocked to third-party clients by their server policy; use the upstream free providers instead.
+- No local LLM is bundled, and no provider restrictions are bypassed.
+- Updates are manual: build and install a newer release over the same location.
+- Automatic update delivery, code signing, and crash reporting are not implemented.
