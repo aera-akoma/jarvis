@@ -83,8 +83,10 @@ If a provider does not expose a `/models` catalog, Jarvis still lets you send us
 
 Some providers accept a browser sign-in instead of a pasted key. **Sign in with browser…** in Settings opens the sign-in dialog, which currently supports:
 
-- **Microsoft Entra ID (Azure OpenAI / AI Foundry)** — device code flow (RFC 8628): Jarvis shows a code and opens the provider page; you approve there; the token is stored securely. You first need a public-client app and the tenant id from the Microsoft developer console.
-- **Google (Gemini)** — installed-app authorization code + PKCE on a loopback redirect, using a Desktop OAuth client you create.
+- **Microsoft Entra ID (Azure OpenAI / AI Foundry)** — device code flow (RFC 8628): Jarvis shows a code and opens the provider page; you approve there; the token is stored securely. You need a **public-client app registration**, your directory (tenant) id, and a **Cognitive Services OpenAI User** role for your identity on the Azure AI resource. After sign-in Jarvis selects the **Azure OpenAI / AI Foundry — browser sign-in** preset; replace `<resource-name>` in its Runtime URL and enter your **deployment name** as the model.
+- **Google (Gemini)** — installed-app authorization code + PKCE on a loopback redirect, using a **Desktop app** OAuth client you create (only the client id is needed). After sign-in Jarvis selects the **Google Gemini — free tier** preset automatically.
+
+Full step-by-step setup for both providers, including the two developer consoles, role assignment, and troubleshooting: **[docs/oauth_setup.md](docs/oauth_setup.md)**.
 
 Jarvis implements only the standard OAuth flows (device authorization grant and RFC 7636 PKCE) and never performs a private or undocumented token exchange, so it does not impersonate GitHub Copilot's internal client or any other official client. Tokens are written straight to the Windows DPAPI credential store and are never displayed, logged, or backed up. A stored token expires like the provider's own token; sign in again (or use an API key) once it stops being accepted. Tests use a fake transport only — no live sign-in is ever performed by the test suite.
 

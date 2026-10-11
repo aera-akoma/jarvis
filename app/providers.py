@@ -223,6 +223,14 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         docs_url="https://github.com/settings/tokens",
         note="Free with a GitHub personal access token; the model list may need the model typed in.",
     ),
+    ProviderPreset(
+        id="azure_openai",
+        label="Azure OpenAI / AI Foundry — browser sign-in",
+        base_url="https://<resource-name>.openai.azure.com/openai/v1",
+        credential_name="azure_openai",
+        docs_url="https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource",
+        note="Signed in through Settings > Sign in with browser… (Entra device-code flow). Replace <resource-name> with your Azure OpenAI resource; the model box takes your deployment name (for example gpt-4o-mini). The signed-in Entra identity also needs a role on the resource, such as Cognitive Services OpenAI User.",
+    ),
     # ── OpenCode routes ──────────────────────────────────────────────────────
     ProviderPreset(
         id="opencode_zen",

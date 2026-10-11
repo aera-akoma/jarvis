@@ -57,6 +57,18 @@ def test_provider_presets_are_unique_and_resolvable():
     assert len(names) == len(set(names))
 
 
+def test_azure_sign_in_preset_makes_the_token_usable():
+    # The browser sign-in stores the token under credential_name "azure_openai".
+    # A preset must exist with that credential name, otherwise requests would
+    # never read the signed-in token.
+    preset = get_preset("azure_openai")
+    assert preset is not None
+    assert preset.credential_name == "azure_openai"
+    assert preset.id == "azure_openai"
+    assert preset.base_url.startswith("https://")
+    assert "azure" in preset.base_url
+
+
 def test_client_uses_provider_scoped_credential(monkeypatch):
     class Store:
         def __init__(self):
