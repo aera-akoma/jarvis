@@ -18,6 +18,7 @@ This repository is not a React/Electron web app. It is a Python desktop applicat
 - Desktop UI with PySide6
 - Conversation/session management
 - Local memory store with search
+- Learning: relevance-ranked memories with categories in every prompt, session-wide memory suggestions after successful tasks, and a user-approved `remember_memory` tool for the agent
 - Managed-browser automation: navigate, click, type, history, named-key presses, scroll, wait-for-load, link extraction, and page screenshots
 - Document reading: PDF, Word (.docx), Excel (.xlsx), and plain-text extraction for analysis
 - Workflow and settings persistence

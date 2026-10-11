@@ -21,7 +21,7 @@ class PermissionPolicy:
     def __init__(self) -> None:
         self.levels = {
             "safe": {"screenshot", "read_file", "list_directory", "open_app", "read_app_state", "search_files", "search_local", "get_windows", "focus_window", "list_workflows", "browser_wait", "read_document"},
-            "moderate": {"edit_file", "create_file", "create_directory", "rename_file", "move_file", "launch_browser", "open_browser", "navigate_browser", "take_browser_screenshot", "send_message", "install_software", "write_file", "take_screenshot", "move_mouse", "click", "double_click", "right_click", "type_text", "press_key", "move_window", "resize_window", "search_web", "undo", "browser_go_back", "browser_go_forward", "browser_scroll", "extract_links"},
+            "moderate": {"edit_file", "create_file", "create_directory", "rename_file", "move_file", "launch_browser", "open_browser", "navigate_browser", "take_browser_screenshot", "send_message", "install_software", "write_file", "take_screenshot", "move_mouse", "click", "double_click", "right_click", "type_text", "press_key", "move_window", "resize_window", "search_web", "undo", "browser_go_back", "browser_go_forward", "browser_scroll", "extract_links", "remember_memory"},
             "dangerous": {"delete_file", "format_drive", "run_command", "change_security_settings", "financial_transaction", "run_powershell", "hotkey", "close_application", "click_browser_element", "type_browser", "read_page", "close_browser", "run_workflow", "press_browser_key"},
         }
 

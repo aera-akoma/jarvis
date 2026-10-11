@@ -554,7 +554,7 @@ class MainWindow(QMainWindow):
         display_text = request_text
         if attachments:
             display_text += "\n\n" + "\n".join(f"[Attached file: {item['name']}]" for item in attachments)
-        registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager)
+        registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager, memory_manager=self.memory_manager)
         fallback_models = [model for model in self._configured_models() if model != model_name]
         model_adapter = OpenAICompatibleModelAdapter(registry, self.runtime, model_name, fallback_models=fallback_models)
         self.agent_loop = AgentLoop(registry=registry, model_adapter=model_adapter, action_logger=self._log_action, workflow_manager=self.workflow_manager)
@@ -636,8 +636,16 @@ class MainWindow(QMainWindow):
                     name, accepted = QInputDialog.getText(self, "Name workflow", "Workflow name:", text=suggestion["suggested_name"])
                     if accepted and name.strip():
                         self.workflow_manager.save_workflow(name, suggestion["steps"])
-        candidates = self.pending_memory_candidates
+        candidates = self.memory_candidate_extractor.dedupe_candidates(self.pending_memory_candidates)
         self.pending_memory_candidates = []
+        if result.get("success"):
+            # Learn from the whole recent turn, including the assistant's own
+            # summary, not only the newest user input. Confirmation still gates
+            # every save, so nothing persists without the user's approval.
+            recent = self.session_manager.get_messages(self.active_conversation["id"])[-8:]
+            candidates = self.memory_candidate_extractor.dedupe_candidates(
+                [*candidates, *self.memory_candidate_extractor.extract_conversation(recent)]
+            )
         for candidate in candidates:
             answer = QMessageBox.question(
                 self, "Save a Jarvis memory?",
@@ -723,7 +731,7 @@ class MainWindow(QMainWindow):
                                      QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return {"success": False, "cancelled": True, "error": "Workflow run was cancelled."}
-        registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager)
+        registry = ToolRegistry(desktop_controller=self.windows_controller, workflow_manager=self.workflow_manager, search_manager=self.search_manager, memory_manager=self.memory_manager)
         self.workflow_worker = WorkflowWorker(self.workflow_manager, workflow_id, registry, PermissionPolicy())
         self.workflow_worker.confirmation_requested.connect(self._confirm_tool_call)
         self.workflow_worker.result_ready.connect(self._workflow_finished)

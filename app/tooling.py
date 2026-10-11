@@ -32,11 +32,12 @@ class ToolDefinition:
 
 class ToolRegistry:
     def __init__(self, desktop_controller: WindowsController | None = None, workflow_manager: Any | None = None,
-                 search_manager: SearchManager | None = None) -> None:
+                 search_manager: SearchManager | None = None, memory_manager: Any | None = None) -> None:
         self.tools: dict[str, ToolDefinition] = {}
         self.desktop = desktop_controller or WindowsController()
         self.workflow_manager = workflow_manager
         self.search_manager = search_manager
+        self.memory_manager = memory_manager
         self.undo_manager = UndoManager()
         self._active_process: subprocess.Popen[str] | None = None
         self._process_lock = threading.Lock()
@@ -76,6 +77,7 @@ class ToolRegistry:
             ToolDefinition("open_application", "Open an application or document on Windows.", "safe", {"path": "application or document path"}, self._open_application),
             ToolDefinition("run_powershell", "Run a PowerShell command.", "dangerous", {"command": "PowerShell command"}, self._run_powershell),
             ToolDefinition("undo", "Undo Jarvis's most recent reversible action (for example a file write, a created file or directory, or a window move). Say 'undo' and Jarvis reverses what it last changed.", "moderate", {}, self._undo),
+            ToolDefinition("remember_memory", "Persist a durable fact or preference the user stated (for example 'I prefer Groq as the primary model'). Jarvis asks the user to approve before saving; secrets and personal contact details are refused.", "moderate", {"content": "the fact or preference to remember", "category": "optional category: profile, preference, work, project, habit, workflow, instruction"}, self._remember_memory),
         ]
         for definition in definitions:
             self.register(definition)
@@ -222,6 +224,26 @@ class ToolRegistry:
     def _read_document(self, path: str) -> dict[str, Any]:
         from app.content_reader import read_document
         return read_document(path)
+
+    def _remember_memory(self, content: str = "", category: str = "") -> dict[str, Any]:
+        from app.memory.memory_manager import MEMORY_CATEGORIES, MemoryCandidateExtractor, MemoryManager
+
+        content = (content or "").strip()
+        if not content:
+            return {"ok": False, "success": False, "error": "Memory content cannot be empty."}
+        category = (category or "").strip().lower()
+        if not category:
+            candidate = MemoryCandidateExtractor._classify(content, explicitly_requested=False)
+            if candidate:
+                category = candidate["category"]
+            if not category:
+                return {"ok": False, "success": False, "error": "Could not detect a memory category; choose one of: " + ", ".join(MEMORY_CATEGORIES)}
+        try:
+            manager = self.memory_manager or MemoryManager()
+            saved = manager.add_memory(category, content, source="remember_memory")
+        except ValueError as exc:
+            return {"ok": False, "success": False, "error": str(exc)}
+        return {"ok": True, "success": True, "saved": saved}
 
     def _write_file(self, path: str, content: str = "") -> dict[str, Any]:
         file_path = Path(path)

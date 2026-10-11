@@ -223,6 +223,39 @@ class MemoryCandidateExtractor:
                 candidates.append(candidate)
         return candidates
 
+    def extract_conversation(self, messages: list[dict[str, Any] | str]) -> list[dict[str, Any]]:
+        """Extract memory candidates across user and assistant messages.
+
+        Conservative: only the explicit "I prefer / always / my workflow is" style
+        phrasings produce candidates, and candidates are deduplicated across the
+        whole turn so the same fact is offered once.
+        """
+        combined: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for message in messages:
+            content = message.get("content", "") if isinstance(message, dict) else message
+            content = (content or "").strip()
+            if not content:
+                continue
+            for candidate in self.extract_many(content):
+                signature = " ".join(_TOKEN_PATTERN.findall(candidate["content"].lower()))
+                if signature and signature not in seen:
+                    seen.add(signature)
+                    combined.append(candidate)
+        return combined
+
+    @staticmethod
+    def dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse near-identical proposed memories, keeping the first."""
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            signature = " ".join(_TOKEN_PATTERN.findall(candidate["content"].lower()))
+            if signature and signature not in seen:
+                seen.add(signature)
+                unique.append(candidate)
+        return unique
+
     def extract(self, text: str) -> dict[str, Any] | None:
         """Backward-compatible helper returning the first candidate, if any."""
         candidates = self.extract_many(text)
