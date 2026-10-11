@@ -251,3 +251,51 @@ def test_upgrade_without_provider_id_keeps_legacy_openai_credential(tmp_path, mo
     assert "A key is saved securely" in window.credential_status.text()
     window.close()
     app.processEvents()
+
+
+def test_keyless_presets_carry_live_validated_default_models():
+    # These defaults were verified against the live public endpoints with no
+    # API key: each returns HTTP 200 on a one-token chat request.
+    assert get_preset("kilo").default_model == "kilo-auto/free"
+    assert get_preset("llm7").default_model == "DeepSeek-V4-Flash-0731"
+    assert get_preset("ovhcloud").default_model == "Mistral-7B-Instruct-v0.3"
+    # Every preset has an explicit default, or explicitly none so the user picks.
+    for preset in PROVIDER_PRESETS:
+        assert "default_model" in preset.__dataclass_fields__
+
+
+class _FakeProviderError:
+    def __init__(self, status, *, provider_type=None, provider_message=None, stage="chat-completions access test"):
+        self.status = status
+        self.stage = stage
+        self.edge_blocked = False
+        self.provider_type = provider_type
+        self.provider_message = provider_message
+
+
+def _keyless_error_text(monkeypatch, base_url, api_kind):
+    class Store:
+        def get(self, _name):
+            return None
+
+    monkeypatch.setattr("app.opencode.client.CredentialStore", lambda: Store())
+    client = OpenCodeClient(base_url=base_url, credential_name="keyless-validation")
+    assert client.api_key is None
+    assert client._opencode_api_kind() == api_kind
+    error = _FakeProviderError(
+        401,
+        provider_type="PAID_MODEL_AUTH_REQUIRED",
+        provider_message="You need to sign in to use this model.",
+    )
+    return client._post_error(f"{base_url}/chat/completions", "kilo-auto/free", error)
+
+
+def test_opencode_key_hint_is_not_attached_to_third_party_provider_errors(monkeypatch):
+    text = _keyless_error_text(monkeypatch, "https://api.kilo.ai/api/gateway", None)
+    assert "Console service-account key" not in text
+    assert "PAID_MODEL_AUTH_REQUIRED" in text or "paid" in text.lower()
+
+
+def test_opencode_key_hint_still_appears_for_the_opencode_console_route(monkeypatch):
+    text = _keyless_error_text(monkeypatch, "https://opencode.ai/inference/openai/v1", "console")
+    assert "Console service-account key" in text

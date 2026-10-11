@@ -26,6 +26,7 @@ class ProviderPreset:
     docs_url: str = ""
     note: str = ""
     opencode_id: str = ""
+    default_model: str = ""
 
     @property
     def in_opencode(self) -> bool:
@@ -155,6 +156,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         docs_url="https://app.kilo.ai/profile",
         note="Free models with no key required; its auto-router picks from the free pool.",
         opencode_id="kilo",
+        default_model="kilo-auto/free",
     ),
     ProviderPreset(
         id="llm7",
@@ -164,6 +166,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         keyless=True,
         docs_url="https://token.llm7.io",
         note="Works anonymously for the turbo models; a free token raises the limits.",
+        default_model="DeepSeek-V4-Flash-0731",
     ),
     ProviderPreset(
         id="ovhcloud",
@@ -174,6 +177,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         docs_url="https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/",
         note="Free anonymous tier (no key, no signup); rate-limited per IP.",
         opencode_id="ovhcloud",
+        default_model="Mistral-7B-Instruct-v0.3",
     ),
     ProviderPreset(
         id="ollama_cloud",

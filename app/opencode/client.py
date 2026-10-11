@@ -313,7 +313,7 @@ class OpenCodeClient:
                         "will unlock them for Jarvis. Select a paid model; paid access needs Console credits or an "
                         "OpenCode Go subscription. Confirm the saved key is current (rotating a key does not update Jarvis unless you re-save it)."
                     )
-                elif any(word in lowered_type for word in ("auth", "unauthor", "token", "invalidkey", "invalid_key", "forbidden")):
+                elif self._opencode_api_kind() in {"console", "zen"} and any(word in lowered_type for word in ("auth", "unauthor", "token", "invalidkey", "invalid_key", "forbidden")):
                     detail += (
                         " Confirm the key is a Console service-account key (Console > Keys > Add Service Account > Add API Key)."
                     )

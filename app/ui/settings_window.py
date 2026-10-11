@@ -171,6 +171,10 @@ class SettingsWindow(QDialog):
     def _update_provider_fields(self, preset, *, initial: bool = False) -> None:
         if preset.base_url and (not initial or not self.base_url_input.text().strip()):
             self.base_url_input.setText(preset.base_url)
+        # Offer a validated default model for the preset only when the model box
+        # is empty, so switching providers never clobbers a model the user typed.
+        if preset.default_model and not self.model_input.text().strip():
+            self.model_input.setText(preset.default_model)
         notes = [preset.note] if preset.note else []
         if preset.docs_url:
             notes.append(f"Get a key: {preset.docs_url}")
