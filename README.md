@@ -1,5 +1,7 @@
 # Jarvis
 
+[![CI](https://github.com/aera-akoma/jarvis/actions/workflows/ci.yml/badge.svg)](https://github.com/aera-akoma/jarvis/actions/workflows/ci.yml)
+
 Jarvis is a local-first Windows desktop AI assistant built with Python and PySide6. It runs as a native desktop app, stores data locally, supports secure credentials, maintains chat sessions and memory, and can be packaged into a standalone Windows executable.
 
 ## What this project is
@@ -131,6 +133,8 @@ Three assistant capabilities are adapted from Mark-LV's design (see **Credits an
 ```powershell
 python -m pytest -q
 ```
+
+The same suite runs on GitHub Actions for every push and pull request to `main` (`.github/workflows/ci.yml`): Windows runner, Python 3.13, headless Qt, and pip caching.
 
 ## Build the standalone Windows executable
 
