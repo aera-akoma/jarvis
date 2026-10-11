@@ -18,7 +18,7 @@ This repository is not a React/Electron web app. It is a Python desktop applicat
 ## Features
 
 - Desktop UI with PySide6
-- Conversation/session management, with per-chat rename and delete
+- Conversation/session management, with per-chat rename/delete and one-go deletion of multiple selected chats
 - Local memory store with search
 - Learning: relevance-ranked memories with categories in every prompt, session-wide memory suggestions after successful tasks, and a user-approved `remember_memory` tool for the agent
 - Many free model providers: built-in presets for the "awesome-free-llm-apis" list, three keyless presets, custom OpenAI-compatible endpoints, and automatic retry across a fallback-model list on retryable errors

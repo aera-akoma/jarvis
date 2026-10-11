@@ -105,3 +105,49 @@ def test_chat_rename_and_delete_buttons_from_ui(tmp_path, monkeypatch):
     assert remaining[0]["id"] != active["id"]
     window.close()
     application.processEvents()
+
+
+def test_batch_delete_selected_chats_from_ui(tmp_path, monkeypatch):
+    import time
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from app.ui.main_window import MainWindow
+
+    class _FakeMessageBox:
+        StandardButton = QMessageBox.StandardButton
+
+        @staticmethod
+        def question(*_args, **_kwargs):
+            return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr("app.ui.main_window.OpenCodeClient.available_models", lambda _self: ["test-model"])
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(AppConfig(data_dir=str(tmp_path)))
+    deadline = time.monotonic() + 3
+    while window._models_loading and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
+    monkeypatch.setattr("app.ui.main_window.QMessageBox", _FakeMessageBox)
+
+    active = window.active_conversation
+    others = [window.session_manager.create_conversation(f"Chat {index}", window.default_model_name) for index in range(3)]
+    window._populate_conversation_list()
+    assert window.conversation_list.count() == 4
+    assert not window.delete_selected_button.isEnabled()
+
+    # Check the boxes of two non-active chats, then delete them all in one go.
+    selected = {c["id"] for c in others[:2]}
+    for row in range(window.conversation_list.count()):
+        widget = window.conversation_list.itemWidget(window.conversation_list.item(row))
+        if getattr(widget, "conversation_id", None) in selected:
+            widget.conversation_checkbox.setChecked(True)
+    assert window.delete_selected_button.isEnabled()
+    assert "2" in window.delete_selected_button.text()
+
+    window._delete_selected_chats()
+    remaining = window.session_manager.list_conversations()
+    assert len(remaining) == 2
+    assert active["id"] in {c["id"] for c in remaining}
+    assert not (selected & {c["id"] for c in remaining})
+    assert not window.delete_selected_button.isEnabled()
+    window.close()
+    application.processEvents()

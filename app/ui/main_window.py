@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -347,8 +348,15 @@ class MainWindow(QMainWindow):
         self.conversation_list.setObjectName("chatList")
         self.conversation_list.setSpacing(2)
         self.conversation_list.itemClicked.connect(self._open_chat_item)
+
+        self.delete_selected_button = QPushButton("🗑 Delete selected")
+        self.delete_selected_button.setObjectName("deleteSelected")
+        self.delete_selected_button.setEnabled(False)
+        self.delete_selected_button.clicked.connect(self._delete_selected_chats)
+
         self._populate_conversation_list()
         sidebar_layout.addWidget(self.conversation_list)
+        sidebar_layout.addWidget(self.delete_selected_button)
 
         settings_button = QPushButton("⚙ Settings")
         settings_button.setObjectName("settingsButton")
@@ -452,13 +460,20 @@ class MainWindow(QMainWindow):
                 active_row = self.conversation_list.count() - 1
         if active_row >= 0:
             self.conversation_list.setCurrentRow(active_row)
+        self._update_delete_selected_state()
 
     def _make_chat_row(self, conversation: dict) -> QWidget:
         row = QWidget()
         row.setStyleSheet("QWidget { background: transparent; }")
+        row.conversation_id = conversation["id"]
         layout = QHBoxLayout(row)
         layout.setContentsMargins(8, 2, 8, 2)
         layout.setSpacing(4)
+        check = QCheckBox()
+        check.setToolTip("Select for batch delete")
+        check.toggled.connect(self._update_delete_selected_state)
+        row.conversation_checkbox = check
+        layout.addWidget(check)
         title = QLabel(conversation["title"])
         title.setObjectName("chatItemTitle")
         title.setToolTip(conversation["title"])
@@ -526,6 +541,53 @@ class MainWindow(QMainWindow):
             return
         if conversation_id == self.active_conversation["id"]:
             conversations = self.session_manager.list_conversations()
+            self.active_conversation = (
+                conversations[0]
+                if conversations
+                else self.session_manager.create_conversation("New Chat", self.default_model_name)
+            )
+            self._refresh_history()
+        self._populate_conversation_list()
+
+    def _selected_chat_ids(self) -> list[str]:
+        selected: list[str] = []
+        for row in range(self.conversation_list.count()):
+            item = self.conversation_list.item(row)
+            widget = self.conversation_list.itemWidget(item)
+            check = getattr(widget, "conversation_checkbox", None) if widget is not None else None
+            if check is not None and check.isChecked():
+                conversation_id = getattr(widget, "conversation_id", None)
+                if conversation_id:
+                    selected.append(conversation_id)
+        return selected
+
+    def _update_delete_selected_state(self) -> None:
+        count = len(self._selected_chat_ids())
+        self.delete_selected_button.setText(f"🗑 Delete selected ({count})" if count else "🗑 Delete selected")
+        self.delete_selected_button.setEnabled(count > 0)
+
+    def _delete_selected_chats(self) -> None:
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return
+        selected = self._selected_chat_ids()
+        if not selected:
+            return
+        answer = QMessageBox.question(
+            self, "Delete chats",
+            f"Delete {len(selected)} selected chats? Their messages will be removed permanently.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        deleted_any = False
+        for conversation_id in selected:
+            if self.session_manager.delete_conversation(conversation_id):
+                deleted_any = True
+        if not deleted_any:
+            return
+        conversations = self.session_manager.list_conversations()
+        if self.active_conversation["id"] not in {c["id"] for c in conversations}:
             self.active_conversation = (
                 conversations[0]
                 if conversations
@@ -910,6 +972,7 @@ class MainWindow(QMainWindow):
                 #headerLabel { font-size: 16px; font-weight: 600; }
                 #chatHistory { background: #0d1621; border: 1px solid #243244; border-radius: 12px; padding: 12px; }
                 #newChat { background: #263d59; }
+                #deleteSelected { background: #5a3333; }
                 #settingsButton { background: #263d59; }
                 """
             )
@@ -927,6 +990,7 @@ class MainWindow(QMainWindow):
                 #headerLabel { font-size: 16px; font-weight: 600; }
                 #chatHistory { background: #ffffff; border: 1px solid #dde6f1; border-radius: 12px; padding: 12px; }
                 #newChat { background: #e2ebff; }
+                #deleteSelected { background: #f3cfcf; }
                 #settingsButton { background: #e2ebff; }
                 """
             )
