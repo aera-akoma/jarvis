@@ -7,7 +7,7 @@ import json
 import threading
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QInputDialog,
@@ -343,6 +344,9 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(chats)
 
         self.conversation_list = QListWidget()
+        self.conversation_list.setObjectName("chatList")
+        self.conversation_list.setSpacing(2)
+        self.conversation_list.itemClicked.connect(self._open_chat_item)
         self._populate_conversation_list()
         sidebar_layout.addWidget(self.conversation_list)
 
@@ -436,8 +440,99 @@ class MainWindow(QMainWindow):
 
     def _populate_conversation_list(self) -> None:
         self.conversation_list.clear()
+        active_id = self.active_conversation["id"]
+        active_row = -1
         for conversation in self.session_manager.list_conversations():
-            self.conversation_list.addItem(conversation["title"])
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, conversation["id"])
+            item.setSizeHint(QSize(0, 34))
+            self.conversation_list.addItem(item)
+            self.conversation_list.setItemWidget(item, self._make_chat_row(conversation))
+            if conversation["id"] == active_id:
+                active_row = self.conversation_list.count() - 1
+        if active_row >= 0:
+            self.conversation_list.setCurrentRow(active_row)
+
+    def _make_chat_row(self, conversation: dict) -> QWidget:
+        row = QWidget()
+        row.setStyleSheet("QWidget { background: transparent; }")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(4)
+        title = QLabel(conversation["title"])
+        title.setObjectName("chatItemTitle")
+        title.setToolTip(conversation["title"])
+        layout.addWidget(title, 1)
+        rename_button = QPushButton("✏️")
+        rename_button.setToolTip("Rename chat")
+        rename_button.setFixedSize(26, 26)
+        rename_button.setStyleSheet("background: transparent; border: none; padding: 0; font-size: 14px;")
+        delete_button = QPushButton("🗑")
+        delete_button.setToolTip("Delete chat")
+        delete_button.setFixedSize(26, 26)
+        delete_button.setStyleSheet("background: transparent; border: none; padding: 0; font-size: 14px;")
+        rename_button.clicked.connect(lambda _checked=False, cid=conversation["id"]: self._rename_chat(cid))
+        delete_button.clicked.connect(lambda _checked=False, cid=conversation["id"]: self._delete_chat(cid))
+        layout.addWidget(rename_button)
+        layout.addWidget(delete_button)
+        return row
+
+    def _open_chat_item(self, item) -> None:
+        if item is None:
+            return
+        conversation_id = item.data(Qt.ItemDataRole.UserRole)
+        self._open_chat(str(conversation_id))
+
+    def _open_chat(self, conversation_id: str) -> None:
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return
+        conversation = next((c for c in self.session_manager.list_conversations() if c["id"] == conversation_id), None)
+        if conversation is None or conversation["id"] == self.active_conversation["id"]:
+            return
+        self.active_conversation = conversation
+        self.prompt_input.clear()
+        self._refresh_history()
+        self._populate_conversation_list()
+
+    def _rename_chat(self, conversation_id: str) -> None:
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return
+        conversation = next((c for c in self.session_manager.list_conversations() if c["id"] == conversation_id), None)
+        if conversation is None:
+            return
+        title, accepted = QInputDialog.getText(self, "Rename chat", "New title:", text=conversation["title"])
+        if not accepted or not title.strip():
+            return
+        renamed = self.session_manager.rename_conversation(conversation_id, title.strip())
+        if renamed["id"] == self.active_conversation["id"]:
+            self.active_conversation = renamed
+        self._populate_conversation_list()
+
+    def _delete_chat(self, conversation_id: str) -> None:
+        if self.agent_worker is not None and self.agent_worker.isRunning():
+            return
+        conversation = next((c for c in self.session_manager.list_conversations() if c["id"] == conversation_id), None)
+        if conversation is None:
+            return
+        answer = QMessageBox.question(
+            self, "Delete chat",
+            f"Delete '{conversation['title']}'? Its messages will be removed permanently.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self.session_manager.delete_conversation(conversation_id):
+            return
+        if conversation_id == self.active_conversation["id"]:
+            conversations = self.session_manager.list_conversations()
+            self.active_conversation = (
+                conversations[0]
+                if conversations
+                else self.session_manager.create_conversation("New Chat", self.default_model_name)
+            )
+            self._refresh_history()
+        self._populate_conversation_list()
 
     def new_chat(self) -> None:
         if self.agent_worker is not None and self.agent_worker.isRunning():

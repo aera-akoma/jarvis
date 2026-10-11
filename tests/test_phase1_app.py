@@ -58,3 +58,50 @@ def test_send_does_not_run_synchronous_availability_check(tmp_path, monkeypatch)
     assert warnings == [True]
     window.close()
     application.processEvents()
+
+
+def test_chat_rename_and_delete_buttons_from_ui(tmp_path, monkeypatch):
+    import time
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    class _FakeMessageBox:
+        StandardButton = QMessageBox.StandardButton
+
+        @staticmethod
+        def question(*_args, **_kwargs):
+            return QMessageBox.StandardButton.Yes
+
+    class _FakeInputDialog:
+        @staticmethod
+        def getText(*_args, **_kwargs):
+            return ("Renamed Chat", True)
+
+    monkeypatch.setattr("app.ui.main_window.OpenCodeClient.available_models", lambda _self: ["test-model"])
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(AppConfig(data_dir=str(tmp_path)))
+    deadline = time.monotonic() + 3
+    while window._models_loading and time.monotonic() < deadline:
+        application.processEvents()
+        time.sleep(0.01)
+
+    active = window.active_conversation
+    second = window.session_manager.create_conversation("Second Chat", window.default_model_name)
+    window._populate_conversation_list()
+    assert window.conversation_list.count() == 2
+
+    monkeypatch.setattr("app.ui.main_window.QMessageBox", _FakeMessageBox)
+    monkeypatch.setattr("app.ui.main_window.QInputDialog", _FakeInputDialog)
+
+    # Rename the active chat through the UI handler.
+    window._rename_chat(active["id"])
+    assert window.session_manager.list_conversations()[0]["title"] == "Renamed Chat"
+
+    # Delete the non-active chat, then deleting the last chat creates a fresh one.
+    window._delete_chat(second["id"])
+    assert [c["id"] for c in window.session_manager.list_conversations()] == [active["id"]]
+    window._delete_chat(active["id"])
+    remaining = window.session_manager.list_conversations()
+    assert len(remaining) == 1
+    assert remaining[0]["id"] != active["id"]
+    window.close()
+    application.processEvents()

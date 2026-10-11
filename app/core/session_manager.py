@@ -98,3 +98,25 @@ class SessionManager:
             "SELECT id, title, created_at, updated_at, model_name, project_path FROM conversations ORDER BY updated_at DESC"
         ).fetchall()
         return [dict(row) for row in rows]
+    def rename_conversation(self, conversation_id: str, title: str) -> dict[str, Any]:
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("Conversation title cannot be empty.")
+        self.connection.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+            (title, self._now(), conversation_id),
+        )
+        self.connection.commit()
+        row = self.connection.execute(
+            "SELECT id, title, created_at, updated_at, model_name, project_path FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Conversation {conversation_id} does not exist.")
+        return dict(row)
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        self.connection.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        cursor = self.connection.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        self.connection.commit()
+        return cursor.rowcount > 0
