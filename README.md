@@ -116,7 +116,17 @@ The output is generated under `dist/Jarvis/` as `Jarvis.exe` plus its required b
 
 ## Windows installer
 
-After building `dist/Jarvis/`, install the Nullsoft Scriptable Install System (NSIS) and run `cd installer; makensis installer.nsi` from the repository root. This creates `dist/Jarvis-Setup.exe`. The installer accepts an optional `DIST_ROOT` NSIS define so a fresh build can be packaged without replacing another output. The installer is a user-scoped install and does not require elevation; it installs into `%LOCALAPPDATA%\Programs\Jarvis` and registers its uninstall entry under the current user.
+After building `dist/Jarvis/`, install the Nullsoft Scriptable Install System (NSIS) and compile the script from the repository root:
+
+```powershell
+makensis installer\installer.nsi
+```
+
+This creates `dist\Jarvis-Setup.exe`. For a release snapshot, copy `dist\Jarvis\` to `dist_<label>_<yyyymmdd>\Jarvis\` and point the build at it with the `DIST_ROOT` NSIS define so the working `dist/` output stays untouched:
+
+```powershell
+makensis /DDIST_ROOT=dist_learning_20261011 installer\installer.nsi
+``` The installer is a user-scoped install and does not require elevation; it installs into `%LOCALAPPDATA%\Programs\Jarvis` and registers its uninstall entry under the current user.
 
 Uninstall removes application files and startup integration but keeps the user's database, logs, attachments, credentials, and backups in their profile under `%APPDATA%\Jarvis`. Updates are currently manual: build and install the newer release to the same location. Automatic update delivery is not implemented.
 
