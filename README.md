@@ -102,6 +102,22 @@ Three assistant capabilities are adapted from Mark-LV's design (see **Credits an
 - **Undo.** Jarvis keeps one shared undo stack per session. State-changing tools (`write_file`, `create_file`, `create_directory`, `move_window`, `resize_window`) snapshot their "before" state when they run, and the model can reverse its most recent change with the `undo` tool ("undo that"). Undoing a file write restores the previous content; undoing a created file/directory removes it; undoing a window move/resize restores the prior geometry. A failed undo is kept on the stack so it can be retried, and `undo` itself requires the same `moderate` approval as the actions it reverses.
 - **Self-describing skills.** Any `*.py` module in `app/skills/` that declares a `TOOL` dict (name, description, permission level, handler) is auto-discovered and registered at startup — the registry never needs a code change to pick up a new skill. Modules with invalid or missing declarations are logged and skipped instead of breaking startup. Two example skills ship with Jarvis: `disk_free` and `uptime`.
 
+  A commented authoring template ships as `app/skills/_template.py`; the leading underscore keeps it out of discovery. Copy it to `app/skills/your_skill.py` and fill in the `TOOL` dict plus a `handler` function:
+
+  ```python
+  TOOL = {
+      "name": "hello",
+      "description": "Say hello to someone.",
+      "permission_level": "safe",  # safe | moderate | dangerous
+      "parameters": {"name": "who to greet"},
+  }
+
+  def handler(name: str = "world") -> dict:
+      return {"ok": True, "message": f"Hello, {name}!"}
+  ```
+
+  Choose the permission level carefully: `safe` runs without a prompt, while `moderate` and `dangerous` skills always surface the normal approval dialog before they run.
+
 ## Run tests
 
 ```powershell

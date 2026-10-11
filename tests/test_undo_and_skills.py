@@ -223,6 +223,15 @@ def test_bundled_skills_are_auto_registered():
     assert result["free_bytes"] > 0
 
 
+def test_shipped_skill_template_is_not_discovered():
+    # app/skills/_template.py is a developer authoring aid; the leading
+    # underscore must keep it out of discovery so its example "hello" tool
+    # never reaches the registry.
+    names = {tool.name for tool in discover_skills()}
+    assert "hello" not in names
+    assert {"disk_free", "uptime"} <= names
+
+
 def test_skill_that_collides_with_builtin_is_skipped(tmp_path, monkeypatch):
     module_path = tmp_path / "read_file.py"
     module_path.write_text(
